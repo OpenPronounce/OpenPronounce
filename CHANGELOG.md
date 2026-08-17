@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added: `compare_audio_with_text(..., reference_audio=..., reference_embeddings=...)` to compare against a human recording of the sentence instead of the synthesized voice, and `prosody=False` to skip the pitch/energy contours.
+
 ## 0.3.0 (2026-08-15)
 
 - Added: multi-language support (fr, es, de, it, pt, nl), `lang` parameter everywhere (`--lang` on the CLI, `lang` form field on the API), `GET /languages`. English stays the default and behaves as before.

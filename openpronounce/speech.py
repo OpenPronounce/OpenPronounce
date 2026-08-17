@@ -356,11 +356,21 @@ def compute_pronunciation_score(acoustic_distance, phoneme_error_rate, word_erro
 
 
 def compare_audio_with_text(audio_1, text_reference, sampling_rate=SAMPLING_RATE, use_phone_model=None,
-                            lang=DEFAULT_LANGUAGE):
+                            lang=DEFAULT_LANGUAGE, reference_audio=None, reference_embeddings=None,
+                            prosody=True):
     """Assess how well ``audio_1`` (16 kHz mono waveform) pronounces ``text_reference``.
 
     ``lang`` selects the language (see :data:`openpronounce.languages.LANGUAGES`);
     it drives the reference TTS voice, the phonemizer and the word transcription model.
+
+    The acoustic term compares ``audio_1`` with a native reading of the sentence. By
+    default that reading is synthesized (see :func:`openpronounce.audio.text2speech`);
+    pass ``reference_audio`` (a 16 kHz mono waveform, e.g. a human recording of the same
+    sentence) or ``reference_embeddings`` (its :func:`extract_embeddings` output, handy
+    when the same reference is reused many times) to use it instead.
+
+    ``prosody=False`` skips the pitch and energy contours (pYIN is the slowest step
+    after the neural models) and leaves ``prosody`` out of the result.
 
     Returns a JSON-serializable dict with ``score`` (0-100), ``distance``,
     ``differences`` (per-word errors, phonemes, feedback), ``transcribe``,
@@ -377,9 +387,13 @@ def compare_audio_with_text(audio_1, text_reference, sampling_rate=SAMPLING_RATE
 
     emb_1 = extract_embeddings(audio_1, sampling_rate)
 
-    reference_file = audio.text2speech(text_reference, lang=lang)
-    audio_2 = audio.load(reference_file, sr=sampling_rate)
-    emb_2 = extract_embeddings(audio_2, sampling_rate)
+    if reference_embeddings is not None:
+        emb_2 = np.asarray(reference_embeddings)
+    else:
+        if reference_audio is None:
+            reference_file = audio.text2speech(text_reference, lang=lang)
+            reference_audio = audio.load(reference_file, sr=sampling_rate)
+        emb_2 = extract_embeddings(reference_audio, sampling_rate)
 
     distance, path = fastdtw(emb_1, emb_2, dist=euclidean)
     acoustic_distance = distance / max(1, len(path))
@@ -405,10 +419,7 @@ def compare_audio_with_text(audio_1, text_reference, sampling_rate=SAMPLING_RATE
         acoustic_distance, differences["phoneme_error_rate"], differences["word_error_rate"], lang
     )
 
-    energy = extract_energy(audio_1)
-    f0 = interpolate_f0(extract_f0(audio_1, sampling_rate))
-
-    return {
+    result = {
         "score": score,
         "distance": distance,
         "acoustic_distance": round(acoustic_distance, 3),
@@ -416,11 +427,12 @@ def compare_audio_with_text(audio_1, text_reference, sampling_rate=SAMPLING_RATE
         "feedback": differences["feedback"],
         "transcribe": differences["transcribe"],
         "language": lang,
-        "prosody": {
-            "f0": f0.tolist(),
-            "energy": energy.tolist(),
-        },
     }
+    if prosody:
+        energy = extract_energy(audio_1)
+        f0 = interpolate_f0(extract_f0(audio_1, sampling_rate))
+        result["prosody"] = {"f0": f0.tolist(), "energy": energy.tolist()}
+    return result
 
 
 # ---------------------------------------------------------------------------
