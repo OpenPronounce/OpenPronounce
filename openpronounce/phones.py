@@ -43,6 +43,13 @@ FINAL_DELETION_COST = 0.5
 # something else is not a confident error (Goodness-of-Pronunciation style); the
 # confidence decreases linearly from 1 (posterior 0) to 0 (posterior at this value).
 PHONE_PLAUSIBLE_POSTERIOR = 0.05
+# The recording does not match the sentence (another text, or only part of it) when the
+# forced-alignment log likelihood per expected phone, or the share of expected phones
+# that are plausible on their frames, falls below these. Measured on the bundled
+# samples: a correct reading scores about -0.3 / 0.9, a poor one -2.4 / 0.5, a wrong
+# sentence -6.9 / 0.1, half of a long sentence -5.2 / 0.5.
+UNRELIABLE_LOG_LIKELIHOOD = -4.0
+UNRELIABLE_PLAUSIBLE_RATIO = 0.3
 
 # Recognizer tokens that are not phones of any supported language: Mandarin tone
 # numbers, aspiration marks and two-letter spellings of English diphthongs.
@@ -286,12 +293,18 @@ def _expected_phones_by_word(text, lang=DEFAULT_LANGUAGE):
                 groups.append(out.split())
             except Exception:  # noqa: BLE001
                 groups.append([])
-    return tuple(words), tuple(tuple(normalize_phones(g, lang)) for g in groups)
+    return tuple(words), tuple(tuple(g) for g in groups)
 
 
-def get_expected_phones(text, lang=DEFAULT_LANGUAGE):
-    """Return ``(words, phones_per_word)`` for ``text``. Words with no phones are kept as empty tuples."""
+def get_expected_phones(text, lang=DEFAULT_LANGUAGE, normalize=True):
+    """Return ``(words, phones_per_word)`` for ``text``. Words with no phones are kept as empty tuples.
+
+    Phones are normalized for ``lang`` (see :func:`normalize_phones`) unless
+    ``normalize=False``, which returns espeak's own phones (length marks, reduced vowels).
+    """
     words, groups = _expected_phones_by_word(text, lang)
+    if normalize:
+        return list(words), [normalize_phones(g, lang) for g in groups]
     return list(words), [list(g) for g in groups]
 
 
@@ -459,16 +472,93 @@ def _word_reports(heard_phones, text_reference, lang=DEFAULT_LANGUAGE):
     return reports
 
 
-def compare_phones(heard_phones, text_reference, lang=DEFAULT_LANGUAGE):
+def _gop_word_reports(recognition, words, groups, raw_groups, lang, threshold):
+    """Word reports from forced alignment and the GOP word model (see :mod:`openpronounce.gop`).
+
+    ``groups`` are the normalized expected phones per word (for display), ``raw_groups``
+    espeak's own phones per word (aligned on the recognizer's tokens).
+
+    Returns ``None`` when no model exists for the language or the recording is too short
+    for the expected phones; otherwise ``(reports, alignment)`` where every word with
+    phones gets ``{position, word, expected, actual, start, end, confidence, phones}``,
+    ``confidence`` being the probability that the word is mispronounced and ``phones``
+    one ``{expected, heard, confidence, start, end}`` per espeak phone of the word.
+    """
+    from . import gop
+
+    model = gop.load_model(lang)
+    if model is None:
+        return None
+    # The alignment works on espeak's own phones: the recognizer has a token for most of
+    # them, so the GOP tells apart what normalization merges for display (ɔ/ɑ, ɾ/t).
+    analysis = gop.analyze(recognition.log_posteriors, recognition.vocab, raw_groups, words, lang)
+    if analysis is None:
+        return None
+    phone_probabilities, word_probabilities = model.predict(analysis)
+    if threshold is None:
+        threshold = model.threshold
+    bundle = {"analysis": analysis, "phone_probabilities": phone_probabilities,
+              "word_probabilities": word_probabilities, "threshold": threshold}
+    by_word = {}
+    for scored, probability in zip(analysis["phones"], phone_probabilities):
+        by_word.setdefault(scored["word_index"], []).append((scored, float(probability)))
+    reports = []
+    for position, items in sorted(by_word.items()):
+        start = min(s["start"] for s, _ in items)
+        end = max(s["end"] for s, _ in items)
+        actual = [phone for phone, (s, e) in zip(recognition.phones, recognition.spans) if s < end and e > start]
+        phone_reports = []
+        for scored, probability in items:
+            expected_phone = normalize_phone(scored["phone"], lang)
+            if probability < 0.5:
+                heard = expected_phone
+            elif scored["heard"] is None:
+                heard = ""
+            else:
+                heard = normalize_phone(recognition.vocab[scored["heard"]], lang)
+            phone_reports.append({
+                "expected": expected_phone, "heard": heard, "confidence": round(probability, 3),
+                "start": round(scored["start"] * gop.FRAME_SECONDS, 3), "end": round(scored["end"] * gop.FRAME_SECONDS, 3),
+            })
+        reports.append({
+            "position": position, "word": words[position], "expected": list(groups[position]), "actual": actual,
+            "start": round(start * gop.FRAME_SECONDS, 3), "end": round(end * gop.FRAME_SECONDS, 3),
+            "confidence": round(float(word_probabilities[position]), 3),
+            "mispronounced": bool(word_probabilities[position] >= threshold),
+            "phones": phone_reports,
+        })
+    utterance = analysis["utterance"]
+    reliability = {
+        "log_likelihood_per_phone": round(utterance["ll_full_per_phone"], 3),
+        "plausible_phone_ratio": round(utterance["plausible_phone_ratio"], 3),
+    }
+    reliability["reliable"] = (reliability["log_likelihood_per_phone"] >= UNRELIABLE_LOG_LIKELIHOOD
+                               and reliability["plausible_phone_ratio"] >= UNRELIABLE_PLAUSIBLE_RATIO)
+    return reports, reliability, bundle
+
+
+def compare_phones(heard_phones, text_reference, lang=DEFAULT_LANGUAGE, threshold=None, use_model=True,
+                   return_analysis=False):
     """Compare recognized phones with the phones expected for ``text_reference`` in ``lang``, word by word.
 
     ``heard_phones`` is either a plain list of phones or a :class:`PhoneRecognition`
-    (from :func:`recognize_phones`). Every wrong phone of a word gets an error
-    confidence: 1 for a substitution, ``NEAR_PHONE_COST`` when the two phones are close
-    (voicing, tense/lax vowel...), less for a dropped or extra phone at the end of the
-    word, and, with a recognition, scaled down when the expected phone was itself
-    plausible in the frame posteriors. A word is reported when the confidences add up
-    to ``PHONE_ERROR_THRESHOLD`` of its phones or to ``PHONE_ERROR_MIN_EDITS``.
+    (from :func:`recognize_phones`).
+
+    With a recognition, the expected phones are force-aligned on the frame posteriors
+    and a model trained on human ratings gives every phone, then every word, the
+    probability of being mispronounced (see :mod:`openpronounce.gop`); a word is
+    reported when that probability reaches ``threshold`` (default: the model's own,
+    tuned for the best F1 against human raters). The result then also carries
+    ``words`` (every word with its probability, time span and per-phone details) and
+    ``alignment`` (how well the recording matches the sentence at all: ``reliable``
+    is false when another sentence, or only part of it, was read).
+
+    With a plain list of phones (no posteriors), for a language without a model or with
+    ``use_model=False``, the heard phones are aligned by edit distance and every wrong phone of a word gets
+    an error confidence: 1 for a substitution, ``NEAR_PHONE_COST`` when the two phones
+    are close (voicing, tense/lax vowel...), less for a dropped or extra phone at the
+    end of the word. A word is reported when the confidences add up to
+    ``PHONE_ERROR_THRESHOLD`` of its phones or to ``PHONE_ERROR_MIN_EDITS``.
 
     Returns a dict with ``expected_phones`` (per word), ``heard_phones``,
     ``heard_phones_confidence`` (0-1 per heard phone), ``phone_error_rate``, ``errors``
@@ -476,14 +566,46 @@ def compare_phones(heard_phones, text_reference, lang=DEFAULT_LANGUAGE):
     ``actual``, ``actual_word``, plus ``phone_distance``, ``confidence`` (0-1, how sure
     we are the word is mispronounced) and ``phones``, a per-phone list of
     ``{expected, heard, confidence}``) and ``words_with_errors``.
+
+    ``return_analysis=True`` returns ``(result, analysis)`` where ``analysis`` is the
+    raw output of the alignment and the word model (``None`` on the rule path), as
+    consumed by :mod:`openpronounce.scorer`.
     """
-    _, heard, heard_confidences = _as_recognition(heard_phones)
+    recognition, heard, heard_confidences = _as_recognition(heard_phones)
     words, groups = get_expected_phones(text_reference, lang)
     expected = [p for g in groups for p in g]
     if expected:
         phone_error_rate = Levenshtein.distance(expected, heard) / len(expected)
     else:
         phone_error_rate = 1.0 if heard else 0.0
+
+    gop_reports = None
+    if recognition is not None and use_model:
+        _, raw_groups = get_expected_phones(text_reference, lang, normalize=False)
+        gop_reports = _gop_word_reports(recognition, words, groups, raw_groups, lang, threshold)
+    if gop_reports is not None:
+        reports, reliability, bundle = gop_reports
+        errors = [{
+            "position": r["position"],
+            "word": r["word"],
+            "expected": "".join(r["expected"]),
+            "actual": "".join(r["actual"]),
+            "actual_word": "",
+            "phone_distance": Levenshtein.distance(r["expected"], r["actual"]),
+            "confidence": r["confidence"],
+            "phones": r["phones"],
+        } for r in reports if r["mispronounced"]]
+        result = {
+            "expected_phones": [list(g) for g in groups],
+            "heard_phones": heard,
+            "heard_phones_confidence": [round(c, 3) for c in heard_confidences],
+            "phone_error_rate": round(phone_error_rate, 4),
+            "errors": errors,
+            "words_with_errors": [e["word"] for e in errors],
+            "words": reports,
+            "alignment": reliability,
+        }
+        return (result, bundle) if return_analysis else result
 
     errors = []
     words_with_errors = []
@@ -502,7 +624,7 @@ def compare_phones(heard_phones, text_reference, lang=DEFAULT_LANGUAGE):
             })
             words_with_errors.append(report["word"])
 
-    return {
+    result = {
         "expected_phones": [list(g) for g in groups],
         "heard_phones": heard,
         "heard_phones_confidence": [round(c, 3) for c in heard_confidences],
@@ -510,3 +632,4 @@ def compare_phones(heard_phones, text_reference, lang=DEFAULT_LANGUAGE):
         "errors": errors,
         "words_with_errors": words_with_errors,
     }
+    return (result, None) if return_analysis else result

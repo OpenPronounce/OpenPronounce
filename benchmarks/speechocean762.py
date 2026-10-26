@@ -33,7 +33,8 @@ HUMAN_BAD_WORD = 5
 FIELDS = [
     "utt", "speaker", "text",
     "human_total", "human_accuracy", "human_fluency", "human_prosodic",
-    "score", "acoustic_distance", "phoneme_error_rate", "word_error_rate",
+    "score", "formula_score", "model_accuracy", "model_fluency", "model_prosodic", "sentence_probability",
+    "acoustic_distance", "phoneme_error_rate", "word_error_rate",
     "n_words", "n_flagged", "n_human_bad", "n_hits",
     "word_recall", "word_precision", "wall_time",
 ]
@@ -170,6 +171,11 @@ def run(args):
                 "human_fluency": row["fluency"],
                 "human_prosodic": row["prosodic"],
                 "score": result["score"],
+                "formula_score": result["formula_score"],
+                "model_accuracy": (result.get("scores") or {}).get("accuracy", ""),
+                "model_fluency": (result.get("scores") or {}).get("fluency", ""),
+                "model_prosodic": (result.get("scores") or {}).get("prosodic", ""),
+                "sentence_probability": diff.get("alignment", {}).get("sentence_probability", ""),
                 "acoustic_distance": result["acoustic_distance"],
                 "phoneme_error_rate": diff["phoneme_error_rate"],
                 "word_error_rate": diff["word_error_rate"],

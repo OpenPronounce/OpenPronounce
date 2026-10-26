@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openpronounce"
 version = "0.3.0"
-description = "Open-source, phoneme-level English pronunciation assessment (Wav2Vec2 + DTW). Score a recording, list mispronounced words, get prosody curves."
+description = "Open-source, phoneme-level pronunciation assessment (Wav2Vec2 forced alignment, models trained on human ratings). Score a recording, list mispronounced words, get prosody curves."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Jean-François Lépine" }]
@@ -75,6 +75,9 @@ Issues = "https://github.com/Halleck45/OpenPronounce/issues"
 
 [tool.setuptools]
 packages = ["openpronounce"]
+
+[tool.setuptools.package-data]
+openpronounce = ["models/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

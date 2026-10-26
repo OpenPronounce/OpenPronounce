@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Changed: mispronounced words are found by forced alignment of the expected phones on the recognizer's posteriors (`openpronounce.alignment`, CTC Viterbi in numpy) and a model trained on the speechocean762 ratings (`openpronounce.gop`, `models/word_mdd_en.json`: MLP on per-phone goodness-of-pronunciation features, trees on their per-word aggregates). On the 2,500-utterance test split, AUC 0.80 → 0.91; at the default threshold precision 0.20 → 0.43 for recall 0.75 → 0.58, 7 % of the words flagged instead of 20 %. `errors[].confidence` is now a probability, `errors[].phones[]` carry `start`/`end`. The edit-distance rule stays for plain phone lists, for languages without a model and with `compare_phones(..., use_model=False)`.
+- Added: `differences.words[]` (every word with its probability, time span and per-phone details) and `differences.alignment` (`sentence_probability`, `reliable`: another sentence or a half-read one is detected, AUC 0.996 on synthetic cases).
+- Changed: the English score comes from gradient-boosted trees trained on the speechocean762 ratings (`openpronounce.scorer`, `models/scorer_en.json`): 53 features from the alignment (goodness of pronunciation, speech rate, pauses, rhythm), the word model and a cheap prosody pass (YIN pitch, RMS energy). `scores` gives `total`, `accuracy`, `fluency`, `prosodic` on 0-100; `score` is the total. Pearson with the human total on the test split 0.63 → 0.77 (fluency 0.81, prosody 0.79). The former formula is returned as `formula_score` and stays the score of the other languages.
+- Added: `compare_audio_with_text(..., acoustic=False)` skips the synthetic reference and the DTW (no gTTS call, about 1.5 s saved on CPU); `distance` and `acoustic_distance` are then `None`.
+- Added: `benchmarks/word_model.py` and `benchmarks/scorer.py` rebuild the models from the corpus; `benchmarks/word_detection.py --report` and `benchmarks/speechocean762.py` report the new system next to the old rule.
 - Added: `compare_audio_with_text(..., reference_audio=..., reference_embeddings=...)` to compare against a human recording of the sentence instead of the synthesized voice, and `prosody=False` to skip the pitch/energy contours.
 
 ## 0.3.0 (2026-08-15)

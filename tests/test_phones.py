@@ -138,7 +138,11 @@ class TestDecodeWithConfidence(unittest.TestCase):
 
 
 class TestConfidenceRule(unittest.TestCase):
-    """The same wrong phones flag a word or not depending on how sure the recognizer was."""
+    """The same wrong phones flag a word or not depending on how sure the recognizer was.
+
+    This is the rule used without a trained word model (``use_model=False``); the model
+    path is covered by tests/test_gop.py.
+    """
 
     VOCAB = ("<pad>", "h", "aʊ", "u", "j", "s", "z", "t")
 
@@ -154,7 +158,7 @@ class TestConfidenceRule(unittest.TestCase):
         return phones.decode_ctc(np.log(lp / lp.sum(axis=1, keepdims=True)), self.VOCAB)
 
     def test_confident_substitution_is_flagged(self):
-        result = phones.compare_phones(self.recognition(["h", "u"]), "how")
+        result = phones.compare_phones(self.recognition(["h", "u"]), "how", use_model=False)
         self.assertEqual(result["words_with_errors"], ["how"])
         error = result["errors"][0]
         self.assertGreaterEqual(error["confidence"], 0.4)
@@ -166,14 +170,14 @@ class TestConfidenceRule(unittest.TestCase):
 
     def test_plausible_expected_phone_is_not_flagged(self):
         # Same heard phones, but the recognizer also gave the expected aʊ a fair posterior on that frame.
-        result = phones.compare_phones(self.recognition(["h", "u"], {1: {"aʊ": 0.08}}), "how")
+        result = phones.compare_phones(self.recognition(["h", "u"], {1: {"aʊ": 0.08}}), "how", use_model=False)
         self.assertEqual(result["words_with_errors"], [])
 
     def test_near_phones_count_half(self):
         # s for z (voicing) in "zoo": half an error over 2 phones, below the threshold
-        self.assertEqual(phones.compare_phones(self.recognition(["s", "u"]), "zoo")["words_with_errors"], [])
+        self.assertEqual(phones.compare_phones(self.recognition(["s", "u"]), "zoo", use_model=False)["words_with_errors"], [])
         # t for z is a full substitution
-        self.assertEqual(phones.compare_phones(self.recognition(["t", "u"]), "zoo")["words_with_errors"], ["zoo"])
+        self.assertEqual(phones.compare_phones(self.recognition(["t", "u"]), "zoo", use_model=False)["words_with_errors"], ["zoo"])
 
     def test_plain_list_keeps_full_confidence(self):
         result = phones.compare_phones(["h", "u"], "how")
@@ -182,6 +186,6 @@ class TestConfidenceRule(unittest.TestCase):
         self.assertEqual(result["errors"][0]["confidence"], 0.5)
 
     def test_serialisable(self):
-        result = phones.compare_phones(self.recognition(["h", "u"]), "how")
+        result = phones.compare_phones(self.recognition(["h", "u"]), "how", use_model=False)
         json.dumps(result)
         self.assertIsInstance(result["errors"][0]["phones"][1]["confidence"], float)

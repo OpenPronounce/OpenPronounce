@@ -2,7 +2,7 @@
 
 <p align="center">
   <b>Open-source, phoneme-level pronunciation assessment.</b><br>
-  Give it a recording and the sentence it should contain. Get a score, the mispronounced words with the sounds actually heard (IPA), the transcription and the pitch and energy curves. Runs on your machine, on CPU.
+  Give it a recording and the sentence it should contain. Get scores learned from human raters (overall, accuracy, fluency, prosody), the mispronounced words with the sounds actually heard (IPA), the transcription and the pitch and energy curves. Runs on your machine, on CPU.
 </p>
 
 <p align="center">
@@ -59,10 +59,12 @@ from openpronounce import load_audio, compare_audio_with_text
 sound = load_audio("recording.wav")          # any format ffmpeg reads, resampled to 16 kHz mono
 result = compare_audio_with_text(sound, "Hello, I am a developer")
 
-print(result["score"])                       # 98.93
+print(result["score"], result["scores"])     # 77.6 {'total': 77.6, 'accuracy': 82.5, 'fluency': 79.4, 'prosodic': 81.1}
 for err in result["differences"]["errors"]:
     print(err["word"], err["expected"], "->", err["actual"] or "(missing)", err["confidence"])
 ```
+
+`compare_audio_with_text(..., acoustic=False)` skips the synthetic reference and the DTW (no network, about 1.5 s saved on CPU); the scores do not depend on it.
 
 Every function takes `lang="en"`. Lower-level pieces are exposed too: `transcribe`, `transcribe_phones`, `get_phonemes`, `compare_phones`, `compare_transcriptions`.
 
@@ -88,25 +90,30 @@ Then open http://localhost:8000: record from the microphone or drop a file, pick
 
 | Field | Meaning |
 |---|---|
-| `score` | 0-100 |
+| `score` | 0-100, the `total` of `scores` (English); the weighted formula below for the other languages |
+| `scores` | `total`, `accuracy`, `fluency`, `prosodic` on 0-100, learned from human ratings (ten times the raters' 0-10 scale: a good learner reading sits around 80) |
+| `formula_score` | the pre-0.4 formula (acoustic distance, phone and word error rates), for comparison |
 | `transcribe` | what the word recognizer heard |
-| `differences.errors[]` | one entry per mispronounced or missing word: `word`, `position`, `expected` and `actual` (IPA), `confidence` (0-1), `phones[]` with `expected`, `heard`, `confidence` for each sound |
+| `differences.errors[]` | one entry per mispronounced word: `word`, `position`, `expected` and `actual` (IPA), `confidence` (probability that the raters would reject the word), `phones[]` with `expected`, `heard`, `confidence`, `start`, `end` for each sound |
+| `differences.words[]` | the same for every word, flagged or not, with its time span and `mispronounced` |
+| `differences.alignment` | does the recording match the sentence at all: `sentence_probability` and `reliable` (false for another sentence or a half-read one), `log_likelihood_per_phone`, `plausible_phone_ratio` |
 | `differences.heard_phones`, `differences.expected_phones` | every sound recognized in the audio (with `heard_phones_confidence`), and the sounds expected for each word |
 | `differences.phoneme_error_rate`, `differences.word_error_rate` | edited sounds / expected sounds, edited words / expected words |
-| `acoustic_distance` | mean per-frame DTW distance between the learner's Wav2Vec2 embeddings and a synthetic native reading |
+| `acoustic_distance` | mean per-frame DTW distance between the learner's Wav2Vec2 embeddings and a synthetic native reading (`None` with `acoustic=False`) |
 | `prosody.f0`, `prosody.energy` | pitch and loudness contours |
 | `differences.expected_vector`, `differences.transcribed_vector` | aligned phoneme traces, ready to plot |
 
 ## How it works
 
 1. A Wav2Vec2 model fine-tuned on espeak labels (`facebook/wav2vec2-lv-60-espeak-cv-ft`) recognizes the sounds actually said, straight from the audio. No language model gets a chance to "correct" the learner.
-2. The sentence is phonemized with espeak-ng in the selected language. Both sequences are normalized (length marks dropped, and for English reduced vowels, cot-caught merger and a few function words with two accepted forms).
-3. Expected and heard sounds are aligned by edit distance. Each wrong sound gets a confidence from the CTC posteriors: full for a clear substitution or deletion, half for a close one (voicing, tense/lax vowel), less at word ends, and scaled down when the expected sound was itself plausible in those frames. A word is reported when the confidences add up to 40 % of its sounds, or to two sounds.
-4. The audio is also transcribed with `facebook/wav2vec2-large-960h` (English) or a language-specific XLSR checkpoint, for the transcription and the word error rate.
-5. The sentence is synthesized (gTTS by default, Piper or Kokoro offline), both recordings are encoded with Wav2Vec2 and aligned with DTW: that is the acoustic distance.
-6. Pitch (pYIN) and RMS energy give the prosody curves.
+2. The sentence is phonemized with espeak-ng in the selected language and its sounds are force-aligned on the frame posteriors of that model (CTC Viterbi, in numpy). Every expected sound gets a time span and a set of goodness-of-pronunciation scores: how far its posterior is from the best token on its frames, how much the sentence likelihood drops when it is deleted or replaced by a close sound, its duration and context.
+3. A small model trained on [speechocean762](https://github.com/jimbozhang/speechocean762) (5,000 utterances rated by five experts, phone by phone and word by word) turns these scores into the probability that each sound, then each word, is mispronounced. A word is reported above 0.27, the point of best F1 against the raters. The same alignment says whether the recording is a reading of the sentence at all.
+4. Gradient-boosted trees trained on the same corpus map 53 utterance-level features (aggregated goodness of pronunciation, speech rate, pauses, rhythm, pitch and energy statistics) to the raters' four scores. Wrong and half-read sentences, absent from the corpus, were added as synthetic examples so that they score low.
+5. The audio is also transcribed with `facebook/wav2vec2-large-960h` (English) or a language-specific XLSR checkpoint, for the transcription and the word error rate.
+6. Unless `acoustic=False`, the sentence is synthesized (gTTS by default, Piper or Kokoro offline), both recordings are encoded with Wav2Vec2 and aligned with DTW: that is the acoustic distance, which feeds `formula_score`.
+7. Pitch (pYIN) and RMS energy give the prosody curves.
 
-The score is `0.3 × acoustic + 0.4 × (1 − phoneme error rate) + 0.3 × (1 − word error rate)`, each term clipped to [0, 100]; the acoustic term maps 6 (100) to 15 (0) in English, with a per-language baseline for the others. Weights and bounds were fitted on 500 [speechocean762](https://github.com/jimbozhang/speechocean762) utterances rated by experts: Spearman ρ = 0.65 with the human total, 0.83 per speaker. A heavier acoustic weight would fit that corpus a little better but would stop punishing a wrong sentence. Details, scripts and word-level precision/recall in [benchmarks/](benchmarks/README.md); constants in `openpronounce.speech` and `openpronounce.phones` if you want to recalibrate on your own data. The original idea is described in [this blog post](https://blog.lepine.pro/en/ai-wav2vec-pronunciation-vectorization/).
+On the speechocean762 test split (2,500 utterances, speakers unseen in training), the scores reach Pearson 0.77 with the human total, 0.72 with accuracy, 0.81 with fluency and 0.79 with prosody; the formula of the previous versions reached 0.63. Of the words flagged, 43 % are rejected by the raters (20 % before), for 58 % of the words they reject (73 % before), with one word in twelve flagged instead of one in five. Details, scripts and the comparison of alternatives (WavLM, ZIPA, logistic variants) in [benchmarks/](benchmarks/README.md). Models are plain JSON files in `openpronounce/models/`, retrainable with `benchmarks/word_model.py` and `benchmarks/scorer.py`. For the other languages, `score` is the pre-0.4 formula `0.3 × acoustic + 0.4 × (1 − phoneme error rate) + 0.3 × (1 − word error rate)` and words are flagged by an edit-distance rule. The original idea is described in [this blog post](https://blog.lepine.pro/en/ai-wav2vec-pronunciation-vectorization/).
 
 ## Configuration
 
@@ -121,17 +128,18 @@ The score is `0.3 × acoustic + 0.4 × (1 − phoneme error rate) + 0.3 × (1 �
 
 ## Limitations
 
-- Only English is calibrated against human ratings. The other languages reuse the English phone thresholds and score weights (only the acoustic baseline is per language) and rely on community XLSR models for the transcription; recordings from native speakers would help.
+- Only English has trained models. The other languages fall back on the edit-distance word rule and the weighted formula (only the acoustic baseline is per language) and rely on community XLSR models for the transcription; rated recordings would help.
+- The models learned from Mandarin-speaking learners, half of them children, reading sentences of 2 to 12 words. The scores follow those raters: a clean adult reading gets about 80, not 100, and a strong accent of another origin is less well covered.
 - Wav2Vec2 was trained on read speech by adults. Strong accents, children and noisy recordings degrade the recognition, and therefore the feedback.
-- The phone recognizer has its own error rate (about one sound in ten on a clean native reading), so expect an occasional false alarm on short words. On speechocean762, one flagged word in five is rated as mispronounced by the human raters, for seven in ten of the words they reject. This is a calibrated heuristic, not a model trained on annotated learner speech.
+- The phone recognizer has its own error rate (about one sound in ten on a clean native reading). The word model knows it and is lenient on function words and word-final consonants, as the raters are; it still misses accent traits they would not rate below 5 either.
 - With gTTS, the first analysis of a sentence needs the network. Piper or Kokoro make it fully offline.
 
 ## Roadmap
 
 - [ ] Hosted demo (the Docker image is ready, `scripts/sync_space.sh` pushes it to a Hugging Face Space)
-- [ ] Phonetic costs inside the alignment itself, to cut the remaining false alarms on short words
-- [ ] Human calibration for French, Spanish, German, Italian, Portuguese, Dutch
-- [x] PyPI package, offline TTS, per-phone confidence, other languages, benchmark, GPU
+- [ ] Show the four scores and the word probabilities in the web demo
+- [ ] Trained models for French, Spanish, German, Italian, Portuguese, Dutch (needs rated recordings)
+- [x] PyPI package, offline TTS, per-phone confidence, other languages, benchmark, GPU, forced alignment and models trained on human ratings
 
 Contributions welcome, see the [open issues](https://github.com/Halleck45/OpenPronounce/issues).
 
