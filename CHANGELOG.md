@@ -7,6 +7,7 @@
 - Changed: the English score comes from gradient-boosted trees trained on the speechocean762 ratings (`openpronounce.scorer`, `models/scorer_en.json`): 53 features from the alignment (goodness of pronunciation, speech rate, pauses, rhythm), the word model and a cheap prosody pass (YIN pitch, RMS energy). `scores` gives `total`, `accuracy`, `fluency`, `prosodic` on 0-100; `score` is the total. Pearson with the human total on the test split 0.63 → 0.79 (accuracy 0.74, fluency 0.82, prosody 0.81). The former formula is returned as `formula_score` and stays the score of the other languages.
 - Added: `compare_audio_with_text(..., acoustic=False)` skips the synthetic reference and the DTW (no gTTS call, about 1.5 s saved on CPU); `distance` and `acoustic_distance` are then `None`.
 - Added: `benchmarks/word_model.py` and `benchmarks/scorer.py` rebuild the models from the corpus; `benchmarks/word_detection.py --report` and `benchmarks/speechocean762.py` report the new system next to the old rule.
+- Changed: the CLI summary prints `accuracy`, `fluency` and `prosodic` under the score and warns when the recording does not sound like a reading of the sentence.
 - Added: `compare_audio_with_text(..., reference_audio=..., reference_embeddings=...)` to compare against a human recording of the sentence instead of the synthesized voice, and `prosody=False` to skip the pitch/energy contours.
 
 ## 0.3.0 (2026-08-15)

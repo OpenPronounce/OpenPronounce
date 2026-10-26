@@ -34,6 +34,12 @@ def main(argv=None):
         return 0
 
     print(f"Score        : {result['score']}/100")
+    if result.get("scores"):
+        scores = result["scores"]
+        print(f"               accuracy {scores['accuracy']}, fluency {scores['fluency']}, prosodic {scores['prosodic']}")
+    alignment = result["differences"].get("alignment")
+    if alignment and not alignment.get("reliable", True):
+        print("Warning      : this does not sound like a reading of that sentence (scores unreliable)")
     print(f"Transcription: {result['transcribe']}")
     if "heard_phones" in result["differences"]:
         print(f"Heard phones : /{' '.join(result['differences']['heard_phones'])}/")
