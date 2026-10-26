@@ -179,7 +179,8 @@ class PhoneRecognition(NamedTuple):
     ``phones`` are normalized, ``confidences`` (0-1) is the peak posterior of each
     phone over the frames it was decoded from, ``spans`` the ``(start, end)`` frame
     range of each phone, ``log_posteriors`` the ``(frames, vocab)`` log posteriors of
-    the model and ``vocab`` its tokens indexed by id.
+    the model, ``vocab`` its tokens indexed by id and ``hidden`` the ``(frames, dim)``
+    hidden states of the layer the word model reads (``None`` when not computed).
     """
 
     phones: list
@@ -187,18 +188,20 @@ class PhoneRecognition(NamedTuple):
     spans: list
     log_posteriors: np.ndarray
     vocab: tuple
+    hidden: np.ndarray = None
 
 
 def _is_special(token):
     return token.startswith("<") and token.endswith(">")
 
 
-def decode_ctc(log_posteriors, vocab, blank_id=0, lang=DEFAULT_LANGUAGE, normalize=True):
+def decode_ctc(log_posteriors, vocab, blank_id=0, lang=DEFAULT_LANGUAGE, normalize=True, hidden=None):
     """Greedy CTC decoding of ``log_posteriors`` (frames x vocab) into a :class:`PhoneRecognition`.
 
     Repeated frames are collapsed, blanks and special tokens dropped. Each phone gets
     the peak posterior of its token over its frames as confidence; when normalization
     merges phones, the merged phone keeps the highest confidence and the union of the frames.
+    ``hidden`` (frame hidden states of the model) is carried along for the word model.
     """
     log_posteriors = np.asarray(log_posteriors, dtype=np.float32)
     ids = log_posteriors.argmax(axis=1)
@@ -214,22 +217,29 @@ def decode_ctc(log_posteriors, vocab, blank_id=0, lang=DEFAULT_LANGUAGE, normali
             spans.append((start, end))
         start = end
     if not normalize:
-        return PhoneRecognition(tokens, confidences, spans, log_posteriors, tuple(vocab))
+        return PhoneRecognition(tokens, confidences, spans, log_posteriors, tuple(vocab), hidden)
     phones, merged_confidences, merged_spans = [], [], []
     for phone, sources in _normalize_indexed(tokens, lang):
         phones.append(phone)
         merged_confidences.append(max(confidences[i] for i in sources))
         merged_spans.append((spans[sources[0]][0], spans[sources[-1]][1]))
-    return PhoneRecognition(phones, merged_confidences, merged_spans, log_posteriors, tuple(vocab))
+    return PhoneRecognition(phones, merged_confidences, merged_spans, log_posteriors, tuple(vocab), hidden)
 
 
-def phone_log_posteriors(audio_waveform, sampling_rate=SAMPLING_RATE):
-    """Frame-level log posteriors of the phone model for a waveform, as a ``(frames, vocab)`` numpy array."""
+def phone_log_posteriors(audio_waveform, sampling_rate=SAMPLING_RATE, hidden_layer=None):
+    """Frame-level log posteriors of the phone model for a waveform, as a ``(frames, vocab)`` numpy array.
+
+    With ``hidden_layer`` (an int, 0 being the input of the first transformer layer), returns
+    ``(log_posteriors, hidden)`` where ``hidden`` is the ``(frames, dim)`` output of that layer.
+    """
     processor, model = _load_model()
     inputs = processor(audio_waveform, sampling_rate=sampling_rate, return_tensors="pt", padding=True)
     with torch.no_grad():
-        logits = model(inputs.input_values.to(get_device())).logits[0]
-    return torch.log_softmax(logits.float(), dim=-1).cpu().numpy()
+        output = model(inputs.input_values.to(get_device()), output_hidden_states=hidden_layer is not None)
+    log_posteriors = torch.log_softmax(output.logits[0].float(), dim=-1).cpu().numpy()
+    if hidden_layer is None:
+        return log_posteriors
+    return log_posteriors, output.hidden_states[hidden_layer][0].float().cpu().numpy()
 
 
 @lru_cache(maxsize=1)
@@ -240,11 +250,24 @@ def phone_vocab():
     return tuple(token for token, _ in sorted(vocab.items(), key=lambda kv: kv[1]))
 
 
-def recognize_phones(audio_waveform, sampling_rate=SAMPLING_RATE, normalize=True, lang=DEFAULT_LANGUAGE):
-    """Recognize the phones of a 16 kHz waveform with their confidences and frame posteriors."""
+def recognize_phones(audio_waveform, sampling_rate=SAMPLING_RATE, normalize=True, lang=DEFAULT_LANGUAGE,
+                     hidden_layer="auto"):
+    """Recognize the phones of a 16 kHz waveform with their confidences and frame posteriors.
+
+    ``hidden_layer`` selects the hidden states kept for the word model of ``lang``:
+    ``"auto"`` takes the layer that model was trained on (none when it reads posteriors only).
+    """
+    from . import gop
+
     processor, _ = _load_model()
-    log_posteriors = phone_log_posteriors(audio_waveform, sampling_rate)
-    return decode_ctc(log_posteriors, phone_vocab(), processor.tokenizer.pad_token_id, lang, normalize)
+    if hidden_layer == "auto":
+        hidden_layer = gop.hidden_layer(lang)
+    hidden = None
+    if hidden_layer is None:
+        log_posteriors = phone_log_posteriors(audio_waveform, sampling_rate)
+    else:
+        log_posteriors, hidden = phone_log_posteriors(audio_waveform, sampling_rate, hidden_layer)
+    return decode_ctc(log_posteriors, phone_vocab(), processor.tokenizer.pad_token_id, lang, normalize, hidden)
 
 
 def transcribe_phones(audio_waveform, sampling_rate=SAMPLING_RATE, normalize=True, lang=DEFAULT_LANGUAGE,
@@ -489,9 +512,14 @@ def _gop_word_reports(recognition, words, groups, raw_groups, lang, threshold):
     model = gop.load_model(lang)
     if model is None:
         return None
+    if model.hidden_layer is not None and recognition.hidden is None:
+        logger.warning("The %s word model needs the hidden states of layer %d: recognize with hidden_layer='auto'",
+                       lang, model.hidden_layer)
+        return None
     # The alignment works on espeak's own phones: the recognizer has a token for most of
     # them, so the GOP tells apart what normalization merges for display (ɔ/ɑ, ɾ/t).
-    analysis = gop.analyze(recognition.log_posteriors, recognition.vocab, raw_groups, words, lang)
+    analysis = gop.analyze(recognition.log_posteriors, recognition.vocab, raw_groups, words, lang,
+                           hidden=recognition.hidden)
     if analysis is None:
         return None
     phone_probabilities, word_probabilities = model.predict(analysis)

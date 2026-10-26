@@ -38,6 +38,8 @@ HEARD_LOG_POSTERIOR = math.log(0.1)
 # each side and this many frames beyond their spans.
 PERTURBATION_CONTEXT = 2
 PERTURBATION_MARGIN = 5
+# A phone's embedding is the mean hidden state over its aligned span widened by this many frames.
+EMBEDDING_MARGIN = 1
 
 PHONE_FEATURES = [
     "gop_margin", "gop_margin_min", "gop_dnn", "lp_target", "ctx_lp_target", "gop_del", "gop_af", "dur",
@@ -159,14 +161,16 @@ def _near_phones(lang):
     return near
 
 
-def analyze(log_posteriors, vocab, groups, words=None, lang=DEFAULT_LANGUAGE):
+def analyze(log_posteriors, vocab, groups, words=None, lang=DEFAULT_LANGUAGE, hidden=None):
     """Force-align the expected phones (``groups``, normalized, one list per word) and score each of them.
 
     Returns ``None`` when the recording is too short for the phones. Otherwise a dict with
     ``phones`` (one dict per expected phone: ``word_index``, ``position``, ``phone``,
     ``start``, ``end`` (frames), ``heard`` (the token id heard instead, or ``None``) and
     every :data:`PHONE_FEATURES` entry) and ``utterance`` (``log_likelihood_per_phone``,
-    ``plausible_phone_ratio``, ``heard_ratio``, ``n_frames``).
+    ``plausible_phone_ratio``, ``heard_ratio``, ``n_frames``). With ``hidden`` (the
+    ``(frames, dim)`` hidden states of the recognizer) every phone also gets ``embedding``,
+    the mean hidden state over its span (see :data:`EMBEDDING_MARGIN`).
     """
     log_posteriors = np.asarray(log_posteriors, dtype=np.float32)
     labels = _Labels(log_posteriors, vocab, groups, lang)
@@ -235,6 +239,10 @@ def analyze(log_posteriors, vocab, groups, words=None, lang=DEFAULT_LANGUAGE):
             "is_last": int(position == n_phones[word_index] - 1), "n_phones": n_phones[word_index],
             "function_word": int(words is not None and words[word_index] in function_words),
         })
+        if hidden is not None:
+            scored[-1]["embedding"] = np.asarray(
+                hidden[max(0, start - EMBEDDING_MARGIN):min(n_frames, end + EMBEDDING_MARGIN)], dtype=np.float32
+            ).mean(axis=0)
     margins = np.array([p["gop_margin"] for p in scored])
     utterance = {
         "n_frames": n_frames,
@@ -260,6 +268,11 @@ NEG_INF = -1e9
 def phone_matrix(scored):
     """``(n_phones, len(PHONE_FEATURES))`` feature matrix of the phones returned by :func:`analyze`."""
     return np.array([[p[name] for name in PHONE_FEATURES] for p in scored], dtype=np.float64)
+
+
+def embedding_matrix(scored):
+    """``(n_phones, dim)`` matrix of the phone embeddings computed by :func:`analyze` with hidden states."""
+    return np.stack([p["embedding"] for p in scored]).astype(np.float64)
 
 
 def word_matrix(scored, probabilities):
@@ -314,7 +327,11 @@ class LogisticModel:
 
 
 class MLPModel:
-    """Small ReLU network with a sigmoid output on standardized features plus one-hot phone identity (JSON weights)."""
+    """Small ReLU network with a sigmoid output on standardized features plus one-hot phone identity (JSON weights).
+
+    An optional ``embedding`` block (``layer``, ``mean``, ``projection``, ``scale``) appends the
+    projected and standardized phone embeddings of that recognizer layer to the inputs.
+    """
 
     def __init__(self, data):
         self.data = data
@@ -325,8 +342,14 @@ class MLPModel:
         self.index = {p: i for i, p in enumerate(self.phones)}
         self.weights = [np.array(w) for w in data["weights"]]
         self.biases = [np.array(b) for b in data["biases"]]
+        self.embedding = data.get("embedding")
+        self.hidden_layer = self.embedding["layer"] if self.embedding else None
+        if self.embedding:
+            self.embedding_mean = np.array(self.embedding["mean"])
+            self.projection = np.array(self.embedding["projection"])
+            self.embedding_scale = np.array(self.embedding["scale"])
 
-    def predict(self, matrix, phones=None):
+    def predict(self, matrix, phones=None, embeddings=None):
         x = (matrix - self.mean) / self.scale
         if self.phones:
             onehot = np.zeros((len(x), len(self.phones)))
@@ -334,6 +357,10 @@ class MLPModel:
                 if phone in self.index:
                     onehot[row, self.index[phone]] = 1.0
             x = np.column_stack([x, onehot])
+        if self.embedding:
+            if embeddings is None:
+                raise ValueError("this model needs the phone embeddings (hidden states of the recognizer)")
+            x = np.column_stack([x, ((embeddings - self.embedding_mean) @ self.projection) / self.embedding_scale])
         for w, b in zip(self.weights[:-1], self.biases[:-1]):
             x = np.maximum(x @ w + b, 0.0)
         z = (x @ self.weights[-1] + self.biases[-1]).ravel()
@@ -393,6 +420,8 @@ class WordModel:
         self.phone = _stage(data["phone"])
         self.word = _stage(data["word"])
         self.threshold = float(data["threshold"])
+        # Recognizer layer whose hidden states the phone stage reads (None: posteriors only).
+        self.hidden_layer = getattr(self.phone, "hidden_layer", None)
 
     @classmethod
     def load(cls, path):
@@ -406,7 +435,11 @@ class WordModel:
     def predict(self, analysis):
         """``(phone_probabilities, {word_index: probability})`` for the output of :func:`analyze`."""
         scored = analysis["phones"]
-        phone_probabilities = self.phone.predict(phone_matrix(scored), [p["phone"] for p in scored])
+        if self.hidden_layer is None:
+            phone_probabilities = self.phone.predict(phone_matrix(scored), [p["phone"] for p in scored])
+        else:
+            phone_probabilities = self.phone.predict(phone_matrix(scored), [p["phone"] for p in scored],
+                                                     embedding_matrix(scored))
         indices, matrix = word_matrix(scored, phone_probabilities)
         return phone_probabilities, dict(zip(indices, self.word.predict(matrix)))
 
@@ -419,6 +452,12 @@ def load_model(lang=DEFAULT_LANGUAGE):
         if os.path.exists(path):
             return WordModel.load(path)
     return None
+
+
+def hidden_layer(lang=DEFAULT_LANGUAGE):
+    """The recognizer layer the word model of ``lang`` reads, or ``None`` (no model, or posteriors only)."""
+    model = load_model(lang)
+    return model.hidden_layer if model is not None else None
 
 
 # ---------------------------------------------------------------------------

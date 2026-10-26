@@ -246,7 +246,7 @@ in `openpronounce/models/` (plain JSON, read with numpy). Both use the whole cor
 to report. Nothing below was tuned on the test split.
 
 ```bash
-python benchmarks/word_model.py --extract train && python benchmarks/word_model.py --extract test   # posteriors, ~25 min each on CPU
+python benchmarks/word_model.py --extract train && python benchmarks/word_model.py --extract test   # posteriors + layer-20 hidden states, ~30 min and 1.4 GB each on CPU
 python benchmarks/word_model.py --features train && python benchmarks/word_model.py --features test  # forced alignment + GOP features, ~1 min each
 python benchmarks/word_model.py --fit --out openpronounce/models/word_mdd_en.json
 python benchmarks/scorer.py --features train && python benchmarks/scorer.py --features test          # utterance features + synthetic negatives
@@ -261,10 +261,12 @@ phone gets 21 features: GOP margin (mean and min over its frames of the target l
 minus the best one), target log posterior, "DNN" GOP, context max, likelihood drop when the
 phone is deleted or replaced by a near phone (computed on a window of two phones on each
 side), duration, position in the word, word length, function word, neighbours' margins,
-utterance statistics (mean margin, alignment likelihood per phone, heard/expected ratio).
-An MLP (64-32, one-hot phone identity appended) predicts `phone accuracy < 2`; its
-out-of-fold probabilities are aggregated per word (min/max/mean, "any") with the GOP
-aggregates and gradient-boosted trees predict `word accuracy < 5`. The threshold (0.27) is
+utterance statistics (mean margin, alignment likelihood per phone, heard/expected ratio),
+plus an embedding: the recognizer's hidden states of layer 20 (of 24) averaged over the
+phone's frames widened by one on each side, reduced to 16 dimensions by a PCA fitted on the
+train split. An MLP (64-32, one-hot phone identity appended) predicts `phone accuracy < 2`;
+its out-of-fold probabilities are aggregated per word (min/max/mean, "any") with the GOP
+aggregates and gradient-boosted trees predict `word accuracy < 5`. The threshold (0.35) is
 the best F1 on the train split.
 
 Test split, 43,781 phones with a human score and 15,967 words (2026-10-26):
@@ -272,18 +274,30 @@ Test split, 43,781 phones with a human score and 15,967 words (2026-10-26):
 | level | system | AUC | AP | P@R.5 | P@R.7 | at the default threshold |
 |---|---|--:|--:|--:|--:|---|
 | phone, accuracy < 2 | raw GOP margin | 0.712 | 0.405 | 0.423 | 0.185 | |
-| phone, accuracy < 2 | MLP (shipped) | 0.851 | 0.590 | 0.597 | 0.482 | |
+| phone, accuracy < 2 | MLP, GOP features | 0.851 | 0.590 | 0.597 | 0.482 | |
+| phone, accuracy < 2 | MLP, GOP features + embedding (shipped) | 0.865 | 0.642 | 0.662 | 0.523 | |
 | word, accuracy < 5 (5.4 %) | 0.3.0 rule | 0.804 | 0.208 | | | P 0.204, R 0.750, 19.9 % flagged |
 | word, accuracy < 5 | min GOP margin alone | 0.883 | 0.324 | 0.319 | 0.236 | |
 | word, accuracy < 5 | logistic phone + logistic word | 0.900 | 0.399 | 0.387 | 0.268 | P 0.381, R 0.507 |
-| word, accuracy < 5 | **MLP phone + trees word (shipped)** | **0.913** | **0.456** | **0.503** | **0.322** | **P 0.425, R 0.582, 7.4 % flagged** |
+| word, accuracy < 5 | MLP phone + trees word, GOP features | 0.913 | 0.456 | 0.503 | 0.322 | P 0.425, R 0.582, 7.4 % flagged |
+| word, accuracy < 5 | **same + embedding (shipped)** | **0.924** | **0.525** | **0.537** | **0.376** | **P 0.533, R 0.506, 5.1 % flagged** |
 | word, accuracy < 7 (8.1 %) | 0.3.0 rule | 0.760 | 0.268 | | | P 0.264, R 0.648 |
-| word, accuracy < 7 | MLP phone + trees word (shipped) | 0.872 | 0.462 | 0.448 | 0.300 | P 0.494, R 0.451 |
+| word, accuracy < 7 | MLP phone + trees word, GOP features | 0.872 | 0.462 | 0.448 | 0.300 | P 0.494, R 0.451 |
+| word, accuracy < 7 | same + embedding (shipped) | 0.886 | 0.518 | 0.498 | 0.343 | P 0.610, R 0.386 |
 
-Pearson between the phone probability and the human phone accuracy: 0.53 (0.48 for the raw
+Pearson between the phone probability and the human phone accuracy: 0.54 (0.48 for the raw
 GOP margin, in line with the 0.44 to 0.50 reported for GOP variants on this corpus). On the
-500-utterance sample of the sections below (`word_detection.py --report`): P 0.386, R 0.577,
-F1 0.463, 8.0 % flagged, against 0.198 / 0.726 / 0.311 / 19.6 % for the 0.3.0 rule.
+500-utterance sample of the sections below (`word_detection.py --report`): P 0.509, R 0.512,
+F1 0.510, 5.4 % flagged, against 0.198 / 0.726 / 0.311 / 19.6 % for the 0.3.0 rule.
+
+The embedding buys precision: at equal recall (0.5) one flagged word in two is right instead
+of one in two and a half, and the words flagged drop from 7.4 % to 5.1 %. Alone, the
+embedding reaches a phone AUC of 0.80: the top layers of a CTC recognizer mostly repeat
+what its posteriors say. Layer 20 beats 8, 12, 16 and 24 (0.853 to 0.863 at 64
+dimensions); averaging over the span is better than over the segment between neighbouring
+phones (0.858 at best); 16 dimensions beat 32, 64, 128 and 256; gradient boosting on the
+same inputs matches the MLP (0.866) and a wider MLP does not help. The hidden states cost
+17 ms per utterance (the forward pass already computes them).
 
 What did not help: ZIPA small (a 64M-parameter multilingual IPA recognizer, 70 MB int8, 0.1 s
 per utterance) as phone model gives a raw word AUC of 0.67 and 0.83 with the classifier, so
@@ -314,21 +328,25 @@ Test split, Pearson / Spearman with the human scores (2026-10-26):
 |---|--:|--:|--:|--:|
 | 0.3.0 formula (500-utterance sample, see below) | 0.633 / 0.652 | 0.603 / 0.631 | 0.595 / 0.590 | 0.618 / 0.622 |
 | ridge, 35 alignment features | 0.736 / 0.717 | 0.721 / 0.681 | 0.760 / 0.752 | 0.745 / 0.739 |
-| trees, 35 alignment features | 0.745 / 0.718 | 0.722 / 0.678 | 0.783 / 0.768 | 0.761 / 0.752 |
-| trees, 53 features, real readings only | 0.771 / 0.730 | 0.743 / 0.690 | 0.796 / 0.775 | 0.783 / 0.757 |
-| **trees, 53 features + negatives (shipped)** | **0.774 / 0.727** | 0.721 / 0.685 | **0.807 / 0.765** | **0.792 / 0.748** |
+| trees, 35 alignment features | 0.745 / 0.718 | 0.722 / 0.678 | 0.781 / 0.768 | 0.761 / 0.752 |
+| trees, 53 features + negatives, word model without embedding | 0.774 / 0.727 | 0.721 / 0.685 | 0.807 / 0.765 | 0.792 / 0.748 |
+| trees, 53 features, real readings only | 0.786 / 0.742 | 0.754 / 0.699 | 0.805 / 0.777 | 0.796 / 0.760 |
+| **trees, 53 features + negatives (shipped)** | **0.790 / 0.733** | 0.742 / 0.693 | **0.824 / 0.775** | **0.807 / 0.755** |
 | ridge, WavLM-base-plus mean+std of all 13 layers | 0.715 / 0.709 | 0.693 / 0.665 | 0.791 / 0.797 | 0.785 / 0.789 |
-| ridge, 53 features + WavLM all layers | 0.748 / 0.732 | 0.730 / 0.693 | 0.804 / 0.804 | 0.798 / 0.795 |
+| ridge, 53 features (word model without embedding) + WavLM all layers | 0.748 / 0.732 | 0.730 / 0.693 | 0.804 / 0.804 | 0.798 / 0.795 |
 
-Mean absolute error of the shipped scorer: 0.74 (total), 0.81, 0.65, 0.67 on the 0-10
-scale. Synthetic negatives of the test split: wrong sentence 1.25 on average (90th
-percentile 1.84), truncated reading 3.0; `sentence_probability` AUC 0.996 (1.4 % of the
-real readings fall under 0.5, all poor ones). The negatives cost 0.02 on accuracy and buy
-the behaviour on wrong sentences.
+The seven word-model aggregates carry the embedding's gain to the scorer: 0.774 → 0.790 on
+the total, 0.721 → 0.742 on accuracy, with the other 46 features unchanged. Mean absolute
+error of the shipped scorer: 0.71 (total), 0.77, 0.62, 0.64 on the 0-10 scale. Synthetic
+negatives of the test split: wrong sentence 1.18 on average (90th percentile 1.63),
+truncated reading 3.0; `sentence_probability` AUC 0.996 (1.4 % of the real readings fall
+under 0.5, all poor ones). The negatives cost 0.01 on accuracy and buy the behaviour on
+wrong sentences.
 
-WavLM-base-plus (95M parameters, 0.3 s per utterance on CPU) adds 0.01 on the total and
-0.02 on fluency and prosody over the alignment features: not worth a third model for now;
-the caches and the comparison are in `scorer.py --wavlm` / `--fit --wavlm-layers`. For
+WavLM-base-plus (95M parameters, 0.3 s per utterance on CPU) added 0.01 on the total and
+0.02 on fluency and prosody over the alignment features when measured against the 0.774
+scorer (not re-run since): not worth a third model for now; the caches and the comparison
+are in `scorer.py --wavlm` / `--fit --wavlm-layers`. For
 reference, the published supervised systems on this corpus reach 0.74 to 0.80 on the total
 (GOPT and followers, from the literature, not re-run here).
 
@@ -336,13 +354,13 @@ Bundled samples (`assets/`), `score` / `formula_score`, English, CPU:
 
 | file | text | score | accuracy | fluency | prosodic | match | flagged | formula | time (acoustic on / off) |
 |---|---|--:|--:|--:|--:|--:|---|--:|---|
-| `developer.wav` (good) | hello I am a developer | 77.6 | 82.5 | 79.4 | 81.1 | 1.00 | | 98.9 | 0.94 s / 0.52 s |
-| `developer_error_an.wav` | same | 82.3 | 83.8 | 81.5 | 81.2 | 0.99 | | 86.5 | 1.04 s / 0.55 s |
-| `developer1.wav` (other voice) | same | 76.1 | 84.4 | 79.1 | 75.9 | 0.99 | | 47.2 | 1.33 s / 0.70 s |
-| `reference.wav` (wrong sentence) | hello I am a developer | 13.5 | 16.1 | 16.9 | 16.0 | 0.00 | am, developer | 18.7 | 0.97 s / 0.50 s |
-| `example.mp3` | Hello, how are you? | 70.6 | 75.0 | 74.8 | 72.3 | 0.97 | how (0.57) | 58.8 | 1.06 s / 0.58 s |
-| `harvard.wav` (18 s) | `harvard_text.txt` | 80.0 | 82.3 | 75.2 | 76.1 | 1.00 | | 84.2 | 7.4 s / 4.0 s |
-| `harvard.wav`, first half only | `harvard_text.txt` | 24.6 | | | | 0.00 | 29 of 43 | | |
+| `developer.wav` (good) | hello I am a developer | 76.6 | 85.0 | 78.7 | 78.6 | 1.00 | | 98.9 | 1.06 s / 0.58 s |
+| `developer_error_an.wav` | same | 81.3 | 86.8 | 85.0 | 79.2 | 0.99 | | 86.5 | 1.16 s / 0.60 s |
+| `developer1.wav` (other voice) | same | 73.9 | 81.5 | 79.6 | 76.9 | 0.99 | | 47.2 | 1.39 s / 0.81 s |
+| `reference.wav` (wrong sentence) | hello I am a developer | 14.6 | 15.6 | 18.7 | 15.2 | 0.00 | am, developer | 18.7 | 1.09 s / 0.61 s |
+| `example.mp3` | Hello, how are you? | 63.8 | 69.1 | 75.5 | 69.9 | 0.97 | how (0.49) | 58.8 | 1.21 s / 0.68 s |
+| `harvard.wav` (18 s) | `harvard_text.txt` | 75.9 | 82.7 | 78.5 | 71.5 | 1.00 | | 81.9 | 8.2 s / 4.6 s |
+| `harvard.wav`, first half only | `harvard_text.txt` | 22.1 | | | | 0.00 | 29 of 43 | | |
 
 The scale is the raters': 8/10 is a typical good learner reading, so a clean adult reading
 scores around 80 rather than 99. `developer1.wav` was "bad" for the formula because of its

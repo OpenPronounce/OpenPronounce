@@ -25,6 +25,15 @@ def _say(*ids, blanks=2):
     return frames
 
 
+def _recognition(lp, lang="en"):
+    """Decode ``lp`` with the hidden states the word model of ``lang`` expects (zeros when it reads some)."""
+    model = gop.load_model(lang)
+    hidden = None
+    if model is not None and model.hidden_layer is not None:
+        hidden = np.zeros((len(lp), model.phone.projection.shape[0]), dtype=np.float32)
+    return phones.decode_ctc(lp, VOCAB, hidden=hidden)
+
+
 class TestLabels(unittest.TestCase):
 
     def test_recognizer_spelling_maps_to_its_own_token(self):
@@ -78,6 +87,16 @@ class TestAnalyze(unittest.TestCase):
         analysis = gop.analyze(lp, VOCAB, [["w", "ɑ", "t"]], ["what"])
         self.assertLess(analysis["phones"][1]["gop_margin"], -1.0)
 
+    def test_hidden_states_give_each_phone_an_embedding(self):
+        lp = _posteriors(_say(4, 5, 6, 7))
+        hidden = np.arange(len(lp), dtype=np.float32)[:, None] * np.ones((1, 3))
+        analysis = gop.analyze(lp, VOCAB, [["h", "ə", "l", "oʊ"]], ["hello"], hidden=hidden)
+        for p in analysis["phones"]:
+            self.assertEqual(p["embedding"].shape, (3,))
+            frames = hidden[max(0, p["start"] - gop.EMBEDDING_MARGIN):p["end"] + gop.EMBEDDING_MARGIN]
+            np.testing.assert_allclose(p["embedding"], frames.mean(axis=0))
+        self.assertEqual(gop.embedding_matrix(analysis["phones"]).shape, (4, 3))
+
     def test_utterance_features_are_complete_and_finite(self):
         lp = _posteriors(_say(4, 5, 6, 7) + [0] * 20 + _say(10, 8, 11))
         analysis = gop.analyze(lp, VOCAB, [["h", "ə", "l", "oʊ"], ["w", "ɑ", "t"]], ["hello", "what"])
@@ -111,8 +130,7 @@ class TestComparePhonesWithPosteriors(unittest.TestCase):
         if gop.load_model("en") is None:
             self.skipTest("no English word model")
         lp = _posteriors(_say(4, 5, 6, 7) + [0] * 10 + _say(10, 8, 11))
-        recognition = phones.decode_ctc(lp, VOCAB)
-        result = phones.compare_phones(recognition, "hello what")
+        result = phones.compare_phones(_recognition(lp), "hello what")
         self.assertIn("words", result)
         self.assertIn("alignment", result)
         self.assertEqual([w["word"] for w in result["words"]], ["hello", "what"])
@@ -129,9 +147,17 @@ class TestComparePhonesWithPosteriors(unittest.TestCase):
         if gop.load_model("en") is None:
             self.skipTest("no English word model")
         lp = _posteriors(_say(4, 5, 6, 7) + _say(4, 5, 6, 7))  # "hello hello" said for "what what what"
-        result = phones.compare_phones(phones.decode_ctc(lp, VOCAB), "what what what")
+        result = phones.compare_phones(_recognition(lp), "what what what")
         self.assertFalse(result["alignment"]["reliable"])
         self.assertLess(result["alignment"]["plausible_phone_ratio"], 0.5)
+
+    def test_without_the_hidden_states_the_model_needs_falls_back_to_the_rule(self):
+        model = gop.load_model("en")
+        if model is None or model.hidden_layer is None:
+            self.skipTest("the English word model reads posteriors only")
+        lp = _posteriors(_say(4, 5, 6, 7))
+        result = phones.compare_phones(phones.decode_ctc(lp, VOCAB), "hello")
+        self.assertNotIn("words", result)
 
     def test_rule_path_is_still_available(self):
         lp = _posteriors(_say(4, 5, 6, 7))
@@ -158,6 +184,28 @@ class TestExportedModels(unittest.TestCase):
         clf = MLPClassifier((16, 8), max_iter=500, random_state=0).fit((self.X - mean) / scale, self.y)
         model = gop.MLPModel(export_mlp(clf, ["a", "b", "c", "d", "e"], mean, scale, []))
         np.testing.assert_allclose(model.predict(self.X), clf.predict_proba((self.X - mean) / scale)[:, 1], atol=1e-6)
+
+    def test_mlp_with_embeddings_matches_sklearn(self):
+        from sklearn.decomposition import PCA
+        from sklearn.neural_network import MLPClassifier
+
+        sys.path.insert(0, "benchmarks")
+        from word_model import export_mlp
+
+        rng = np.random.default_rng(1)
+        E = rng.normal(size=(400, 12)) + self.y[:, None]
+        pca = PCA(4, random_state=0).fit(E)
+        Z = pca.transform(E)
+        scale = Z.std(axis=0) + 1e-9
+        mean, sd = self.X.mean(axis=0), self.X.std(axis=0)
+        inputs = np.column_stack([(self.X - mean) / sd, Z / scale])
+        clf = MLPClassifier((16, 8), max_iter=500, random_state=0).fit(inputs, self.y)
+        block = {"layer": 3, "mean": pca.mean_.tolist(), "projection": pca.components_.T.tolist(), "scale": scale.tolist()}
+        model = gop.MLPModel(export_mlp(clf, ["a", "b", "c", "d", "e"], mean, sd, [], block))
+        self.assertEqual(model.hidden_layer, 3)
+        np.testing.assert_allclose(model.predict(self.X, embeddings=E), clf.predict_proba(inputs)[:, 1], atol=1e-6)
+        with self.assertRaises(ValueError):
+            model.predict(self.X)
 
     def test_trees_match_sklearn(self):
         from sklearn.ensemble import HistGradientBoostingClassifier

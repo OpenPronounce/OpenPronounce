@@ -29,6 +29,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from speechocean762 import DATASET_DIR, load_rows, sample_rows  # noqa: E402
+from word_model import load_posteriors  # noqa: E402
 
 LOGITS_DIR = os.path.join(DATASET_DIR, "logits")
 LABEL_THRESHOLDS = (5, 7)
@@ -112,8 +113,9 @@ def model_rows(labels, vocab):
 
     rows = []
     for k, lab in enumerate(labels):
-        log_posteriors = np.load(os.path.join(LOGITS_DIR, lab["utt"] + ".npy")).astype(np.float32)
-        result = phones.compare_phones(phones.decode_ctc(log_posteriors, vocab), lab["text"].lower())
+        # the full test split cache also holds the hidden states the word model may read
+        log_posteriors, hidden = load_posteriors("test", lab["utt"])
+        result = phones.compare_phones(phones.decode_ctc(log_posteriors, vocab, hidden=hidden), lab["text"].lower())
         for report in result.get("words", []):
             accuracy = lab["words"][report["position"]]["accuracy"]
             for threshold in LABEL_THRESHOLDS:

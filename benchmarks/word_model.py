@@ -1,6 +1,7 @@
 """Train and evaluate the word mispronunciation model (``openpronounce/models/word_mdd_<lang>.json``).
 
-    # 1. cache the phone posteriors of both speechocean762 splits (~25 min each on CPU)
+    # 1. cache the phone posteriors and the hidden states of one recognizer layer for both
+    #    speechocean762 splits (~30 min and 1.4 GB each on CPU)
     python benchmarks/word_model.py --extract train
     python benchmarks/word_model.py --extract test
 
@@ -15,8 +16,9 @@
     python benchmarks/word_model.py --report
 
 Everything is cached under ``~/.cache/openpronounce/speechocean762/``: ``logits_<split>``
-(float16 posteriors, ``labels.json``, ``vocab.json``) and ``gop_<split>.npz`` (one row per
-expected phone). Labels: a phone is wrong when its human accuracy is below 2 (0-2
+(float16 posteriors ``<utt>.npy``, hidden states ``<utt>.hidden.npy`` with their layer in
+``hidden.json``, ``labels.json``, ``vocab.json``) and ``gop_<split>.npz`` (one row per expected
+phone, including its pooled ``embedding``). Labels: a phone is wrong when its human accuracy is below 2 (0-2
 scale), a word when its accuracy is below 5 (strict) or 7 (lenient), 0-10 scale.
 """
 
@@ -35,6 +37,10 @@ from speechocean762 import DATASET_DIR, load_rows  # noqa: E402
 
 logger = logging.getLogger("word_model")
 WORD_LABELS = (5, 7)
+# Recognizer layer whose hidden states feed the phone stage (0: input of the first transformer layer).
+HIDDEN_LAYER = 20
+# Dimensions kept of the phone embeddings (PCA fitted on the train split).
+EMBEDDING_COMPONENTS = 16
 
 
 def logits_dir(split):
@@ -49,7 +55,7 @@ def features_path(split):
 # Caches
 # ---------------------------------------------------------------------------
 
-def extract(split, threads):
+def extract(split, threads, hidden_layer=HIDDEN_LAYER):
     import torch
 
     torch.set_num_threads(threads)
@@ -68,13 +74,18 @@ def extract(split, threads):
         json.dump(labels, f)
     with open(os.path.join(out, "vocab.json"), "w") as f:
         json.dump(list(phones.phone_vocab()), f)
+    with open(os.path.join(out, "hidden.json"), "w") as f:
+        json.dump({"layer": hidden_layer}, f)
     t0 = time.time()
     for k, row in enumerate(rows, 1):
         path = os.path.join(out, row["utt"] + ".npy")
-        if os.path.exists(path):
+        hidden_path = os.path.join(out, row["utt"] + ".hidden.npy")
+        if os.path.exists(path) and os.path.exists(hidden_path):
             continue
         sound = audio.load(io.BytesIO(row["audio"]["bytes"]))
-        np.save(path, phones.phone_log_posteriors(sound).astype(np.float16))
+        log_posteriors, hidden = phones.phone_log_posteriors(sound, hidden_layer=hidden_layer)
+        np.save(path, log_posteriors.astype(np.float16))
+        np.save(hidden_path, hidden.astype(np.float16))
         if k % 100 == 0:
             logger.info("[%d/%d] %.0fs", k, len(rows), time.time() - t0)
 
@@ -88,6 +99,23 @@ def load_cache(split):
     return labels, vocab
 
 
+def cached_hidden_layer(split):
+    """Layer of the cached hidden states of ``split``, or ``None`` when only posteriors were cached."""
+    path = os.path.join(logits_dir(split), "hidden.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)["layer"]
+
+
+def load_posteriors(split, utt):
+    """``(log_posteriors, hidden)`` of a cached utterance, ``hidden`` being ``None`` when not cached."""
+    log_posteriors = np.load(os.path.join(logits_dir(split), utt + ".npy")).astype(np.float32)
+    path = os.path.join(logits_dir(split), utt + ".hidden.npy")
+    hidden = np.load(path).astype(np.float32) if os.path.exists(path) else None
+    return log_posteriors, hidden
+
+
 def features(split, lang="en", normalize=False):
     """One row per expected phone of the split: GOP features, phone and word labels, utterance scores.
 
@@ -96,21 +124,23 @@ def features(split, lang="en", normalize=False):
     from openpronounce import gop, phones
 
     labels, vocab = load_cache(split)
-    rows, skipped = [], 0
+    rows, embeddings, skipped = [], [], 0
     t0 = time.time()
     for k, lab in enumerate(labels, 1):
-        log_posteriors = np.load(os.path.join(logits_dir(split), lab["utt"] + ".npy")).astype(np.float32)
+        log_posteriors, hidden = load_posteriors(split, lab["utt"])
         words, groups = phones.get_expected_phones(lab["text"], lang, normalize=normalize)
         if words != [w["text"].lower() for w in lab["words"]]:
             skipped += 1
             continue
-        analysis = gop.analyze(log_posteriors, vocab, groups, words, lang)
+        analysis = gop.analyze(log_posteriors, vocab, groups, words, lang, hidden=hidden)
         if analysis is None:
             skipped += 1
             continue
         for p in analysis["phones"]:
             word = lab["words"][p["word_index"]]
             matched = len(word["phones"]) == len(groups[p["word_index"]])
+            if hidden is not None:
+                embeddings.append(p["embedding"].astype(np.float16))
             rows.append({
                 "utt": lab["utt"], "speaker": lab["speaker"], "word_index": p["word_index"], "phone": p["phone"],
                 "word_accuracy": word["accuracy"],
@@ -122,7 +152,11 @@ def features(split, lang="en", normalize=False):
         if k % 500 == 0:
             logger.info("[%d/%d] %.0fs", k, len(labels), time.time() - t0)
     logger.info("%d phones, %d utterances skipped", len(rows), skipped)
-    np.savez(features_path(split), **{key: np.array([r[key] for r in rows]) for key in rows[0]})
+    table = {key: np.array([r[key] for r in rows]) for key in rows[0]}
+    if embeddings:
+        table["embedding"] = np.stack(embeddings)
+        table["embedding_layer"] = np.array(cached_hidden_layer(split))
+    np.savez(features_path(split), **table)
 
 
 # ---------------------------------------------------------------------------
@@ -169,12 +203,18 @@ def _fit_logistic(matrix, y, features, phones=None, C=0.3):
     })
 
 
-def export_mlp(clf, features, mean, scale, phones):
-    """JSON dict of a fitted ``MLPClassifier`` (ReLU, logistic output) for :class:`gop.MLPModel`."""
+def export_mlp(clf, features, mean, scale, phones, embedding=None):
+    """JSON dict of a fitted ``MLPClassifier`` (ReLU, logistic output) for :class:`gop.MLPModel`.
+
+    ``embedding`` is the optional ``{layer, mean, projection, scale}`` block of the phone embeddings.
+    """
     assert clf.activation == "relu" and clf.out_activation_ == "logistic"
-    return {"type": "mlp", "features": list(features), "mean": np.asarray(mean).tolist(),
+    data = {"type": "mlp", "features": list(features), "mean": np.asarray(mean).tolist(),
             "scale": np.asarray(scale).tolist(), "phones": list(phones),
             "weights": [w.tolist() for w in clf.coefs_], "biases": [b.tolist() for b in clf.intercepts_]}
+    if embedding is not None:
+        data["embedding"] = embedding
+    return data
 
 
 def export_trees(model, features):
@@ -190,8 +230,10 @@ def export_trees(model, features):
             "link": "identity" if isinstance(model, HistGradientBoostingRegressor) else "sigmoid", "trees": trees}
 
 
-def _fit_mlp(matrix, y, features, phones=None, hidden=(64, 32), alpha=1e-3):
-    """Standardize, one-hot the phone identity, fit an MLP; returns the exported dict."""
+def _fit_mlp(matrix, y, features, phones=None, embeddings=None, layer=None, hidden=(64, 32), alpha=1e-3,
+             components=EMBEDDING_COMPONENTS):
+    """Standardize, one-hot the phone identity, project the embeddings (PCA), fit an MLP; returns the exported dict."""
+    from sklearn.decomposition import PCA
     from sklearn.neural_network import MLPClassifier
 
     mean, scale = matrix.mean(axis=0), matrix.std(axis=0) + 1e-9
@@ -202,8 +244,16 @@ def _fit_mlp(matrix, y, features, phones=None, hidden=(64, 32), alpha=1e-3):
         onehot = np.zeros((len(phones), len(vocabulary)))
         onehot[np.arange(len(phones)), [vocabulary.index(p) for p in phones]] = 1.0
         X = np.column_stack([X, onehot])
+    block = None
+    if embeddings is not None:
+        embeddings = np.asarray(embeddings, dtype=np.float64)
+        pca = PCA(components, random_state=0).fit(embeddings)
+        projected = pca.transform(embeddings)
+        block = {"layer": int(layer), "mean": pca.mean_.tolist(), "projection": pca.components_.T.tolist(),
+                 "scale": (projected.std(axis=0) + 1e-9).tolist()}
+        X = np.column_stack([X, projected / np.array(block["scale"])])
     clf = MLPClassifier(hidden, alpha=alpha, early_stopping=True, max_iter=300, random_state=0).fit(X, y)
-    return export_mlp(clf, features, mean, scale, vocabulary)
+    return export_mlp(clf, features, mean, scale, vocabulary, block)
 
 
 def _fit_trees(matrix, y, features):
@@ -257,46 +307,73 @@ def _best_f1_threshold(y, score):
     return float(thresholds[f1.argmax()])
 
 
-def fit(train, test, out, phone_stage="mlp", word_stage="trees", with_phone_identity=True, folds=5):
-    """Fit the phone stage, then the word stage on out-of-fold phone probabilities (``folds=0``: in-sample)."""
+def _embeddings(table, use_embeddings):
+    """Phone embeddings of a feature table (float64), or ``None`` when absent or not wanted."""
+    if not use_embeddings or "embedding" not in table:
+        return None
+    return table["embedding"].astype(np.float64)
+
+
+def fit(train, test, out, phone_stage="mlp", word_stage="trees", with_phone_identity=True, folds=5,
+        use_embeddings=True, components=EMBEDDING_COMPONENTS):
+    """Fit the phone stage, then the word stage on out-of-fold phone probabilities (``folds=0``: in-sample).
+
+    The phone stage reads the pooled hidden states (``embedding`` column of the tables) when
+    present and ``use_embeddings`` is true; only the MLP stage supports them.
+    """
     from scipy.stats import pearsonr
     from sklearn.metrics import average_precision_score, roc_auc_score
 
     from openpronounce import gop
 
-    def fit_phone(matrix, y, phones):
+    E_train, E_test = _embeddings(train, use_embeddings), _embeddings(test, use_embeddings)
+    if E_train is not None and phone_stage != "mlp":
+        raise SystemExit("embeddings need --phone-stage mlp")
+    layer = int(train["embedding_layer"]) if E_train is not None else None
+    if E_train is not None and (E_test is None or int(test["embedding_layer"]) != layer):
+        raise SystemExit("train and test embeddings come from different layers")
+
+    def fit_phone(rows, phones):
+        y = train["phone_accuracy"][rows] < 2
         if phone_stage == "mlp":
-            return gop.MLPModel(_fit_mlp(matrix, y, gop.PHONE_FEATURES, phones))
-        return _fit_logistic(matrix, y, gop.PHONE_FEATURES, phones)
+            embeddings = E_train[rows] if E_train is not None else None
+            return gop.MLPModel(_fit_mlp(X_train[rows], y, gop.PHONE_FEATURES, phones, embeddings, layer,
+                                         components=components))
+        return _fit_logistic(X_train[rows], y, gop.PHONE_FEATURES, phones)
+
+    def predict_phone(model, matrix, phones, embeddings):
+        if getattr(model, "hidden_layer", None) is not None:
+            return model.predict(matrix, phones, embeddings)
+        return model.predict(matrix, phones)
 
     def fit_word(matrix, y):
         if word_stage == "trees":
             return gop.TreeEnsemble(_fit_trees(matrix, y, gop.WORD_FEATURES))
         return _fit_logistic(matrix, y, gop.WORD_FEATURES)
 
+    def ids(table, rows=slice(None)):
+        return table["phone"][rows] if with_phone_identity else None
+
     matched = train["phone_accuracy"] >= 0
-    phone_ids = train["phone"] if with_phone_identity else None
     X_train = _phone_matrix(train)
-    phone_model = fit_phone(X_train[matched], train["phone_accuracy"][matched] < 2,
-                            phone_ids[matched] if phone_ids is not None else None)
+    phone_model = fit_phone(matched, ids(train, matched))
     # out-of-fold phone probabilities on the train split, so the word model does not learn on overfit inputs
-    oof = phone_model.predict(X_train, train["phone"] if with_phone_identity else None)
+    oof = predict_phone(phone_model, X_train, ids(train), E_train)
     utts = np.unique(train["utt"])
     rng = np.random.RandomState(0)
     rng.shuffle(utts)
     for fold in np.array_split(utts, folds) if folds else []:
         held = np.isin(train["utt"], fold)
         fit_rows = ~held & matched
-        model = fit_phone(X_train[fit_rows], train["phone_accuracy"][fit_rows] < 2,
-                          phone_ids[fit_rows] if phone_ids is not None else None)
-        oof[held] = model.predict(X_train[held], train["phone"][held] if with_phone_identity else None)
+        model = fit_phone(fit_rows, ids(train, fit_rows))
+        oof[held] = predict_phone(model, X_train[held], ids(train, held), E_train[held] if E_train is not None else None)
     Xw_train, acc_train, _ = _word_rows(train, oof)
     word_model = fit_word(Xw_train, acc_train < 5)
     threshold = _best_f1_threshold(acc_train < 5, word_model.predict(Xw_train))
 
     metrics = {}
     test_matched = test["phone_accuracy"] >= 0
-    p_test = phone_model.predict(_phone_matrix(test), test["phone"] if with_phone_identity else None)
+    p_test = predict_phone(phone_model, _phone_matrix(test), ids(test), E_test)
     print(f"phone level (test, {int(test_matched.sum())} phones with a human score):")
     y = test["phone_accuracy"][test_matched] < 2
     _report(f"{phone_stage} p(phone wrong)", y, p_test[test_matched])
@@ -334,7 +411,13 @@ def report(test, lang):
     from openpronounce import gop
 
     model = gop.load_model(lang)
-    p = model.phone.predict(_phone_matrix(test), test["phone"] if model.phone.phone_bias else None)
+    phones = test["phone"] if getattr(model.phone, "phones", None) or getattr(model.phone, "phone_bias", None) else None
+    if model.hidden_layer is None:
+        p = model.phone.predict(_phone_matrix(test), phones)
+    else:
+        if "embedding" not in test or int(test["embedding_layer"]) != model.hidden_layer:
+            raise SystemExit(f"the shipped model reads layer {model.hidden_layer}: re-run --extract and --features")
+        p = model.phone.predict(_phone_matrix(test), phones, test["embedding"].astype(np.float64))
     Xw, acc, _ = _word_rows(test, p)
     score = model.word.predict(Xw)
     for label in WORD_LABELS:
@@ -359,18 +442,21 @@ def main(argv=None):
     parser.add_argument("--phone-stage", default="mlp", choices=["mlp", "logistic"])
     parser.add_argument("--word-stage", default="trees", choices=["trees", "logistic"])
     parser.add_argument("--folds", type=int, default=5, help="out-of-fold phone probabilities for the word stage (0: in-sample)")
+    parser.add_argument("--no-embeddings", action="store_true", help="--fit on the GOP features only")
+    parser.add_argument("--components", type=int, default=EMBEDDING_COMPONENTS, help="PCA dimensions of the embeddings")
+    parser.add_argument("--hidden-layer", type=int, default=HIDDEN_LAYER, help="recognizer layer cached by --extract")
     parser.add_argument("--lang", default="en")
     parser.add_argument("--threads", type=int, default=8)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
     logging.getLogger("phonemizer").setLevel(logging.ERROR)
     if args.extract:
-        extract(args.extract, args.threads)
+        extract(args.extract, args.threads, args.hidden_layer)
     elif args.features:
         features(args.features, args.lang)
     elif args.fit:
         fit(_load("train"), _load("test"), args.out, args.phone_stage, args.word_stage, with_phone_identity=not args.generic,
-            folds=args.folds)
+            folds=args.folds, use_embeddings=not args.no_embeddings, components=args.components)
     else:
         report(_load("test"), args.lang)
 

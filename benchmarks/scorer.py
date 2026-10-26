@@ -21,7 +21,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from speechocean762 import DATASET_DIR, load_rows  # noqa: E402
-from word_model import load_cache, logits_dir  # noqa: E402
+from word_model import load_cache, load_posteriors, logits_dir  # noqa: E402
 
 logger = logging.getLogger("scorer")
 TARGETS = ("total", "accuracy", "fluency", "prosodic")
@@ -110,13 +110,14 @@ def features(split, lang="en"):
         return sounds[utt]
 
     def row_for(utt, text, fraction):
-        log_posteriors = np.load(os.path.join(logits_dir(split), utt + ".npy")).astype(np.float32)
+        log_posteriors, hidden = load_posteriors(split, utt)
         sound = sound_of(utt)
         if fraction < 1.0:
             log_posteriors = log_posteriors[: int(len(log_posteriors) * fraction)]
+            hidden = hidden[: len(log_posteriors)] if hidden is not None else None
             sound = sound[: int(len(sound) * fraction)]
         words, groups = phones.get_expected_phones(text, lang, normalize=False)
-        analysis = gop.analyze(log_posteriors, vocab, groups, words, lang)
+        analysis = gop.analyze(log_posteriors, vocab, groups, words, lang, hidden=hidden)
         if analysis is None:
             return None
         phone_p, word_p = model.predict(analysis)
