@@ -2,7 +2,7 @@ name: Publish to PyPI
 
 # Runs when a v* tag is pushed, or when dispatched on a tag by the Release workflow
 # (PyPI trusted publishing does not support reusable workflows, so this must be the
-# top-level workflow). Trusted publisher on pypi.org: owner Halleck45, repository
+# top-level workflow). Trusted publisher on pypi.org: owner OpenPronounce, repository
 # OpenPronounce, workflow publish.yml, environment pypi.
 on:
   push:

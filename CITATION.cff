@@ -4,5 +4,5 @@ title: "OpenPronounce: open-source phoneme-level English pronunciation assessmen
 authors:
   - family-names: "Lépine"
     given-names: "Jean-François"
-repository-code: "https://github.com/Halleck45/OpenPronounce"
+repository-code: "https://github.com/OpenPronounce/OpenPronounce"
 license: AGPL-3.0-or-later

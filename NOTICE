@@ -38,5 +38,10 @@ Optional, under their own copyleft licence
 
 Web demo only
 
+  Microphone picker and auto-stop toggle (static/audio.js, static/ui.js,
+  templates/index.html), contributed under the MIT licence.
+  Copyright (c) 2026 Ronald Rodrigues Farias. See LICENSE-MIT-0.x.
+
+
   static/assets/mouths/HunanBeanCMU39, from Papagayo-NG
   https://github.com/morevnaproject-org/papagayo-ng

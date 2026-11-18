@@ -3,7 +3,7 @@
 Bug reports, benchmark results on new data and pull requests are welcome.
 
 ```bash
-git clone https://github.com/Halleck45/OpenPronounce.git && cd OpenPronounce
+git clone https://github.com/OpenPronounce/OpenPronounce.git && cd OpenPronounce
 python -m venv .venv && source .venv/bin/activate
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -e ".[app,dev]"

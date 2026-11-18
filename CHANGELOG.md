@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 (2026-11-18)
+
+Two changes break compatibility with 0.4:
+
+- the licence is now the AGPL-3.0-or-later, with a commercial licence for closed products (see `LICENSING.md`). 0.4 and earlier stay MIT;
+- English scores come from a model trained on human ratings, and their scale has moved: a good reading that scored about 97 in 0.4 scores about 80 now. If your code compares scores with fixed thresholds, set them again.
+
+In detail:
 
 - Changed: OpenPronounce is now published under the AGPL-3.0-or-later, with a commercial licence for closed products (`LICENSING.md`). Releases 0.1 to 0.4 stay MIT (`LICENSE-MIT-0.x`). `NOTICE` lists the third-party components, `CONTRIBUTING.md` the terms of contributions.
 - Changed: English no longer needs espeak-ng. The expected sounds come from the CMU pronouncing dictionary shipped with the package (`openpronounce.g2p`); `Levenshtein` (GPL) leaves the dependencies, replaced by `rapidfuzz`. On the speechocean762 test split the results do not move (word AUC 0.928 against 0.924, total Pearson 0.791 against 0.790, same models). The other languages still use espeak-ng. `OPENPRONOUNCE_G2P=espeak` restores the former behaviour for English.
@@ -29,6 +36,11 @@
 - Added: `benchmarks/word_model.py` and `benchmarks/scorer.py` rebuild the models from the corpus; `benchmarks/word_detection.py --report` and `benchmarks/speechocean762.py` report the new system next to the old rule.
 - Changed: the CLI summary prints `accuracy`, `fluency` and `prosodic` under the score and warns when the recording does not sound like a reading of the sentence.
 - Added: `compare_audio_with_text(..., reference_audio=..., reference_embeddings=...)` to compare against a human recording of the sentence instead of the synthesized voice, and `prosody=False` to skip the pitch/energy contours.
+
+## 0.4.0 (2026-11-09)
+
+- Added: microphone picker and auto-stop toggle in the web demo (#9, by Ronald Rodrigues Farias).
+- Fixed: the Docker images upgrade pip before installing the app extras (#12).
 
 ## 0.3.0 (2026-08-15)
 

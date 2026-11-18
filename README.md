@@ -7,8 +7,8 @@
 
 <p align="center">
   <a href="https://pypi.org/project/openpronounce/"><img src="https://img.shields.io/pypi/v/openpronounce.svg" alt="PyPI"></a>
-  <a href="https://github.com/Halleck45/OpenPronounce/actions/workflows/tests.yml"><img src="https://github.com/Halleck45/OpenPronounce/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
-  <a href="https://colab.research.google.com/github/Halleck45/OpenPronounce/blob/main/OpenPronounce-demo.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open in Colab"></a>
+  <a href="https://github.com/OpenPronounce/OpenPronounce/actions/workflows/tests.yml"><img src="https://github.com/OpenPronounce/OpenPronounce/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="https://colab.research.google.com/github/OpenPronounce/OpenPronounce/blob/main/OpenPronounce-demo.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open in Colab"></a>
   <a href="LICENSING.md"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License: AGPL-3.0"></a>
 </p>
 

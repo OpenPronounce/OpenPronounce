@@ -8,7 +8,7 @@ Releases 0.1 to 0.4 were published under the MIT licence and stay under it ([LIC
 
 If the AGPL does not fit your product, a commercial licence replaces it: you ship OpenPronounce inside closed software, on a server, in a mobile app or in a browser, without publishing your own code. It covers the code of this repository and the models shipped with it, for every language.
 
-You do not need it to find out whether OpenPronounce is good enough for you: the AGPL lets you run it on your own recordings, and `openpronounce-evaluate` tells you how closely its scores follow your assessors'. When the figures suit you, write to the author through <https://blog.lepine.pro>.
+You do not need it to find out whether OpenPronounce is good enough for you: the AGPL lets you run it on your own recordings, and `openpronounce-evaluate` tells you how closely its scores follow your assessors'. When the figures suit you, the plans and prices are at <https://openpronounce.github.io/pricing.html>, and the terms at <https://openpronounce.github.io/docs/commercial-licence.html>.
 
 ## What a commercial licence does not cover
 
