@@ -90,6 +90,29 @@ def extract(split, threads, hidden_layer=HIDDEN_LAYER):
             logger.info("[%d/%d] %.0fs", k, len(rows), time.time() - t0)
 
 
+GENERIC_KINDS = ("word_mdd", "word_missing", "scorer", "free_scorer")
+
+
+def english_on_generic_models():
+    """Make English run on the generic models, as every other language does.
+
+    The generic scorers have to learn from the features the other languages will give them,
+    and their native reference has to be measured the same way. This puts first in
+    ``$OPENPRONOUNCE_MODELS_DIR`` a directory where the generic models carry the name of
+    English. Call it before openpronounce loads a model. Returns the directory.
+    """
+    import tempfile
+
+    from openpronounce import gop
+
+    directory = tempfile.mkdtemp(prefix="openpronounce-generic-")
+    for kind in GENERIC_KINDS:
+        source = gop.model_path(f"{kind}_generic.json")
+        if source is not None:
+            os.symlink(source, os.path.join(directory, f"{kind}_en.json"))
+    os.environ[gop.MODELS_ENV] = os.pathsep.join([directory] + [d for d in os.environ.get(gop.MODELS_ENV, "").split(os.pathsep) if d])
+    return directory
+
 def load_cache(split):
     out = logits_dir(split)
     with open(os.path.join(out, "labels.json")) as f:

@@ -21,11 +21,62 @@ from functools import lru_cache
 import numpy as np
 
 from . import alignment
-from .languages import DEFAULT_LANGUAGE
+from .languages import DEFAULT_LANGUAGE, get_language
 
 logger = logging.getLogger(__name__)
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+MODELS_ENV = "OPENPRONOUNCE_MODELS_DIR"
+PACKAGE_LICENSE = "AGPL-3.0-or-later"
+MODEL_KINDS = {"free_scorer": "free speech scorer", "scorer": "utterance scorer", "word_mdd": "word model",
+               "word_missing": "missing word model", "native": "native speakers of the language against those of English"}
+
+
+def models_dirs():
+    """Directories searched for model files, in order.
+
+    ``$OPENPRONOUNCE_MODELS_DIR`` (one directory, or several separated by ``os.pathsep``)
+    comes before the models shipped in the package, so a directory holding
+    ``scorer_<lang>.json`` / ``word_mdd_<lang>.json`` adds a language or replaces a
+    shipped model without touching the installation.
+    """
+    extra = [d for d in os.environ.get(MODELS_ENV, "").split(os.pathsep) if d]
+    return extra + [MODELS_DIR]
+
+
+def model_path(name):
+    """Path of the first ``name`` found in :func:`models_dirs`, or ``None``."""
+    for directory in models_dirs():
+        path = os.path.join(directory, name)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def installed_models():
+    """One dict per model file that would be loaded: ``kind``, ``lang``, ``path``, ``bundled``, ``license``, ``trained_on``, ``metrics``.
+
+    A file shadowed by an earlier directory is not listed. Shipped models follow the licence of the package; a
+    model from another directory says so in its ``license`` key, or is ``unspecified``.
+    """
+    found = {}
+    for directory in models_dirs():
+        if not os.path.isdir(directory):
+            continue
+        for name in sorted(os.listdir(directory)):
+            kind = next((k for k in MODEL_KINDS if name.startswith(k + "_") and name.endswith(".json")), None)
+            if kind is None or name in found:
+                continue
+            path = os.path.join(directory, name)
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            bundled = os.path.abspath(directory) == os.path.abspath(MODELS_DIR)
+            found[name] = {
+                "kind": kind, "lang": name[len(kind) + 1:-len(".json")], "path": path, "bundled": bundled,
+                "license": data.get("license", PACKAGE_LICENSE if bundled else "unspecified"),
+                "trained_on": data.get("trained_on"), "metrics": data.get("metrics", {}),
+            }
+    return sorted(found.values(), key=lambda m: (m["lang"], m["kind"]))
 # Seconds per frame of the wav2vec2 phone model (320 samples at 16 kHz).
 FRAME_SECONDS = 0.02
 # An expected phone whose log posterior stays below this on all its frames is implausible
@@ -69,6 +120,13 @@ def _token_groups(vocab, lang):
     return _token_ids_by_phone(vocab, lang)
 
 
+_VOWEL_LETTERS = set("aeiouyæɑɒɔəɛɜɪʊʌøœɐɨɵʉɯɤ")
+
+
+def _is_vowel_token(token):
+    return token[:1] in _VOWEL_LETTERS
+
+
 @lru_cache(maxsize=4096)
 def _label_ids(phone, vocab, lang):
     """Token ids standing for ``phone``: one group per label, usually a single group.
@@ -81,9 +139,17 @@ def _label_ids(phone, vocab, lang):
     its own label.
     """
     index = {token: i for i, token in enumerate(vocab)}
-    for spelling in (phone, phone.replace("ː", "")):
+    # What native voices are heard to say for this phone of espeak, and the short
+    # consonant for a long one (geminates are rarely recognized as such).
+    accepted = [index[token] for token in get_language(lang).accepted(phone) if token in index]
+    short = phone.replace("ː", "")
+    if phone.endswith("ː") and short in index and not _is_vowel_token(short):
+        accepted.append(index[short])
+    for spelling in (phone, short):
         if spelling in index and not spelling.startswith("<"):
-            return ((index[spelling],),)
+            return (tuple(dict.fromkeys([index[spelling]] + accepted)),)
+    if accepted:
+        return (tuple(dict.fromkeys(accepted)),)
     groups = _token_groups(vocab, lang)
     from .phones import normalize_phone
 
@@ -420,6 +486,8 @@ class WordModel:
         self.phone = _stage(data["phone"])
         self.word = _stage(data["word"])
         self.threshold = float(data["threshold"])
+        #: Trained without the identity of the phones: the model every language without its own falls back on.
+        self.generic = data.get("lang") == "generic"
         # Recognizer layer whose hidden states the phone stage reads (None: posteriors only).
         self.hidden_layer = getattr(self.phone, "hidden_layer", None)
 
@@ -448,8 +516,8 @@ class WordModel:
 def load_model(lang=DEFAULT_LANGUAGE):
     """The :class:`WordModel` of ``lang``, or the generic (no phone identity) model, or ``None``."""
     for name in (f"word_mdd_{lang}.json", "word_mdd_generic.json"):
-        path = os.path.join(MODELS_DIR, name)
-        if os.path.exists(path):
+        path = model_path(name)
+        if path is not None:
             return WordModel.load(path)
     return None
 
@@ -458,6 +526,142 @@ def hidden_layer(lang=DEFAULT_LANGUAGE):
     """The recognizer layer the word model of ``lang`` reads, or ``None`` (no model, or posteriors only)."""
     model = load_model(lang)
     return model.hidden_layer if model is not None else None
+
+
+# ---------------------------------------------------------------------------
+# Words that were not said, speech that was not expected
+# ---------------------------------------------------------------------------
+
+#: A recognized phone counts as heard from this confidence on.
+HEARD_CONFIDENCE = 0.5
+MISSING_FEATURES = ["del_max", "del_mean", "ctx_max", "ctx_mean", "lp_mean", "gm_mean", "frames_per_phone",
+                    "heard_per_phone", "n_phones"]
+#: Heard phones nobody expected, counted around a word boundary: the ones between the two
+#: words, plus half of what each neighbour holds beyond its own phones.
+EXTRA_SPEECH_SCORE = 2.0
+EXTRA_NEIGHBOUR_WEIGHT = 0.5
+
+
+def _word_spans(analysis):
+    spans = {}
+    for p in analysis["phones"]:
+        start, end = spans.get(p["word_index"], (p["start"], p["end"]))
+        spans[p["word_index"]] = (min(start, p["start"]), max(end, p["end"]))
+    return spans
+
+
+def _heard_spans(spans, confidences):
+    return [span for span, confidence in zip(spans, confidences) if confidence >= HEARD_CONFIDENCE]
+
+
+def missing_matrix(analysis, spans, confidences):
+    """``(word_indices, matrix)`` of :data:`MISSING_FEATURES`, one row per aligned word.
+
+    A word that was not said leaves traces the mispronounced ones do not: the alignment
+    loses nothing when its phones are removed (``del_*``), none of them is plausible
+    anywhere near (``ctx_*``), and it is squeezed into a few frames where no phone was heard.
+    ``spans`` and ``confidences`` are the frame spans and confidences of the recognized phones.
+    """
+    heard = _heard_spans(spans, confidences)
+    by_word = {}
+    for p in analysis["phones"]:
+        by_word.setdefault(p["word_index"], []).append(p)
+    indices, rows = sorted(by_word), []
+    for index in indices:
+        phones = by_word[index]
+        start, end = min(p["start"] for p in phones), max(p["end"] for p in phones)
+        deletions = [p["gop_del"] for p in phones]
+        contexts = [p["ctx_lp_target"] for p in phones]
+        rows.append([
+            max(deletions), float(np.mean(deletions)), max(contexts), float(np.mean(contexts)),
+            float(np.mean([p["lp_target"] for p in phones])), float(np.mean([p["gop_margin"] for p in phones])),
+            (end - start) / len(phones), sum(1 for s, e in heard if s < end and e > start) / len(phones), len(phones),
+        ])
+    return indices, np.array(rows, dtype=float)
+
+
+class MissingModel:
+    """Logistic model and threshold of ``models/word_missing_<lang>.json``."""
+
+    def __init__(self, data):
+        self.data = data
+        self.model = LogisticModel(data["model"])
+        self.threshold = float(data["threshold"])
+
+    def predict(self, analysis, spans, confidences):
+        """``{word_index: probability that the word was not said}``."""
+        indices, matrix = missing_matrix(analysis, spans, confidences)
+        return dict(zip(indices, self.model.predict(matrix).tolist()))
+
+
+@lru_cache(maxsize=8)
+def load_missing_model(lang=DEFAULT_LANGUAGE):
+    """The :class:`MissingModel` of ``lang``, or the generic one, or ``None``."""
+    for name in (f"word_missing_{lang}.json", "word_missing_generic.json"):
+        path = model_path(name)
+        if path is not None:
+            with open(path, encoding="utf-8") as f:
+                return MissingModel(json.load(f))
+    return None
+
+
+def extra_speech(analysis, spans, confidences):
+    """Stretches where more was said than expected: ``[{after, before, start, end, heard}]``.
+
+    ``after`` and ``before`` are the indices of the words around the stretch (``None`` at the
+    beginning and at the end of the sentence), ``start`` / ``end`` frames, ``heard`` the
+    indices of the recognized phones nobody expected there. Around every word boundary the
+    heard phones lying between the two words are counted, plus :data:`EXTRA_NEIGHBOUR_WEIGHT`
+    of what each neighbour holds beyond its own phones (the alignment stretches a word over
+    speech it has no other place for); :data:`EXTRA_SPEECH_SCORE` makes a stretch.
+    Boundaries that share a stretched word are reported once.
+    """
+    heard = [(i, span) for i, (span, confidence) in enumerate(zip(spans, confidences)) if confidence >= HEARD_CONFIDENCE]
+    word_spans = _word_spans(analysis)
+    indices = sorted(word_spans)
+    if not indices:
+        return []
+    n_phones = {index: 0 for index in indices}
+    for p in analysis["phones"]:
+        n_phones[p["word_index"]] += 1
+    surplus = {}
+    for index in indices:
+        start, end = word_spans[index]
+        surplus[index] = max(0, sum(1 for _, (s, e) in heard if s < end and e > start) - n_phones[index])
+    n_frames = analysis["utterance"]["n_frames"]
+    fired = []
+    for b in range(len(indices) + 1):
+        previous = indices[b - 1] if b else None
+        following = indices[b] if b < len(indices) else None
+        gap_start = word_spans[previous][1] if previous is not None else 0
+        gap_end = word_spans[following][0] if following is not None else n_frames
+        between = [i for i, (s, e) in heard if s >= gap_start and e <= gap_end]
+        score = len(between) + EXTRA_NEIGHBOUR_WEIGHT * (surplus.get(previous, 0) + surplus.get(following, 0))
+        if score >= EXTRA_SPEECH_SCORE:
+            fired.append((b, previous, following, between))
+    # A stretched word fires the boundary on each of its sides. When the phones lie on one
+    # side only, that side is the stretch; when they are all inside the word, the two
+    # boundaries make one stretch around it.
+    with_phones = {b for b, _, _, between in fired if between}
+    events = []
+    for b, previous, following, between in fired:
+        if not between:
+            if (b - 1 in with_phones and surplus.get(previous, 0)) or (b + 1 in with_phones and surplus.get(following, 0)):
+                continue
+            if events and events[-1]["_boundary"] == b - 1 and not events[-1]["heard"] and surplus.get(previous, 0):
+                events[-1].update(before=following, _boundary=b)
+                continue
+        events.append({"after": previous, "before": following, "heard": list(between), "_boundary": b})
+    for event in events:
+        del event["_boundary"]
+        if not event["heard"]:
+            # Everything sits inside the neighbours: show what they hold.
+            inside = [word_spans[i] for i in (event["after"], event["before"]) if i is not None and surplus[i]]
+            event["heard"] = [i for i, (s, e) in heard if any(s < end and e > start for start, end in inside)]
+        frames = [spans[i] for i in event["heard"]]
+        event["start"] = min(s for s, _ in frames) if frames else 0
+        event["end"] = max(e for _, e in frames) if frames else 0
+    return events
 
 
 # ---------------------------------------------------------------------------

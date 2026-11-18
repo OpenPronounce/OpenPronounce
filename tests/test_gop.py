@@ -51,6 +51,51 @@ class TestLabels(unittest.TestCase):
         self.assertEqual(gop._label_ids("x", VOCAB, "en"), ())
 
 
+class TestLanguageVariants(unittest.TestCase):
+
+    VOCAB = ("<pad>", "ʋ", "v", "ɪ", "t", "tː", "iː", "i")
+
+    def test_english_accepts_nothing_else(self):
+        self.assertEqual(gop._label_ids("v", self.VOCAB, "en"), ((2,),))
+        self.assertEqual(gop._label_ids("iː", self.VOCAB, "en"), ((6,),))
+
+    def test_dutch_w_is_also_heard_as_v(self):
+        self.assertEqual(gop._label_ids("ʋ", self.VOCAB, "nl"), ((1, 2),))
+        self.assertEqual(gop._label_ids("ʋ", self.VOCAB, "fr"), ((1,),))
+
+    def test_long_consonant_accepts_the_short_one_but_a_long_vowel_does_not(self):
+        self.assertEqual(gop._label_ids("tː", self.VOCAB, "it"), ((5, 4),))
+        self.assertEqual(gop._label_ids("iː", self.VOCAB, "it"), ((6,),))
+
+
+class TestLanguageThreshold(unittest.TestCase):
+
+    def test_english_keeps_the_threshold_of_its_own_model(self):
+        from openpronounce.languages import LANGUAGES
+        self.assertIsNone(LANGUAGES["en"].word_threshold)
+        self.assertFalse(gop.load_model("en").generic)
+
+    def test_other_languages_report_from_a_lower_probability_than_the_generic_model(self):
+        from openpronounce.languages import LANGUAGES
+        model = gop.load_model("fr")
+        self.assertTrue(model.generic)
+        for code, language in LANGUAGES.items():
+            if code != "en":
+                self.assertGreater(language.word_threshold, 0.0)
+                self.assertLess(language.word_threshold, model.threshold)
+
+
+class TestRescale(unittest.TestCase):
+
+    def test_the_language_threshold_lands_on_the_model_threshold(self):
+        from openpronounce import phones
+        self.assertAlmostEqual(phones._rescale(0.09, 0.09, 0.31), 0.31)
+        self.assertAlmostEqual(phones._rescale(0.0, 0.09, 0.31), 0.0)
+        self.assertAlmostEqual(phones._rescale(1.0, 0.09, 0.31), 1.0)
+        self.assertLess(phones._rescale(0.05, 0.09, 0.31), 0.31)
+        self.assertGreater(phones._rescale(0.2, 0.09, 0.31), 0.31)
+
+
 class TestAnalyze(unittest.TestCase):
 
     def test_too_short(self):
@@ -164,6 +209,57 @@ class TestComparePhonesWithPosteriors(unittest.TestCase):
         result = phones.compare_phones(phones.decode_ctc(lp, VOCAB), "hello", use_model=False)
         self.assertNotIn("words", result)
         self.assertEqual(result["errors"], [])
+
+
+class TestMissingAndExtra(unittest.TestCase):
+
+    GROUPS, WORDS = [["h", "ə", "l", "oʊ"], ["w", "ɑ", "t"]], ["hello", "what"]
+
+    def _extra(self, frames):
+        lp = _posteriors(frames)
+        recognition = phones.decode_ctc(lp, VOCAB)
+        analysis = gop.analyze(lp, VOCAB, self.GROUPS, self.WORDS)
+        return recognition, gop.extra_speech(analysis, recognition.spans, recognition.confidences)
+
+    def test_exact_reading_has_no_extra_speech(self):
+        _, events = self._extra(_say(4, 5, 6, 7) + [0] * 6 + _say(10, 8, 11))
+        self.assertEqual(events, [])
+
+    def test_speech_between_two_words_is_located(self):
+        recognition, events = self._extra(_say(4, 5, 6, 7) + [0] * 6 + _say(11, 4, 11) + [0] * 6 + _say(10, 8, 11))
+        self.assertEqual(len(events), 1)
+        self.assertEqual((events[0]["after"], events[0]["before"]), (0, 1))
+        self.assertEqual([recognition.phones[i] for i in events[0]["heard"]], ["t", "h", "t"])
+        self.assertLess(events[0]["start"], events[0]["end"])
+
+    def test_speech_after_the_sentence_is_located(self):
+        recognition, events = self._extra(_say(4, 5, 6, 7) + [0] * 6 + _say(10, 8, 11) + [0] * 6 + _say(4, 5, 6, 7))
+        self.assertEqual([(e["after"], e["before"]) for e in events], [(1, None)])
+        self.assertEqual(len(events[0]["heard"]), 4)
+
+    def test_missing_features_tell_a_word_that_was_not_said(self):
+        lp = _posteriors(_say(4, 5, 6, 7) + [0] * 12)
+        recognition = phones.decode_ctc(lp, VOCAB)
+        analysis = gop.analyze(lp, VOCAB, self.GROUPS, self.WORDS)
+        indices, matrix = gop.missing_matrix(analysis, recognition.spans, recognition.confidences)
+        self.assertEqual(indices, [0, 1])
+        self.assertEqual(matrix.shape, (2, len(gop.MISSING_FEATURES)))
+        said, absent = (dict(zip(gop.MISSING_FEATURES, row)) for row in matrix)
+        self.assertGreater(said["del_mean"], absent["del_mean"])
+        self.assertGreater(said["heard_per_phone"], absent["heard_per_phone"])
+        self.assertEqual(absent["heard_per_phone"], 0)
+
+    def test_word_that_was_not_said_gets_a_higher_missing_confidence(self):
+        if gop.load_model("en") is None or gop.load_missing_model("en") is None:
+            self.skipTest("no English models")
+        lp = _posteriors(_say(4, 5, 6, 7) + [0] * 12)
+        result = phones.compare_phones(_recognition(lp), "hello what")
+        hello, what = result["words"]
+        self.assertGreater(what["missing_confidence"], hello["missing_confidence"])
+        self.assertFalse(hello.get("missing", False))
+        self.assertEqual(result["extra"], [])
+        for error in result["errors"]:
+            self.assertEqual(error.get("missing", False), bool(result["words"][error["position"]].get("missing")))
 
 
 class TestExportedModels(unittest.TestCase):

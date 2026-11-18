@@ -5,6 +5,10 @@
     python benchmarks/scorer.py --fit --out openpronounce/models/scorer_en.json
     python benchmarks/scorer.py --report              # shipped scorer on the test split
 
+``--generic`` on every step builds the scorer of the other languages (``scorer_generic.json``):
+English is read through the generic word model, and the tables go to ``utt_generic_<split>.npz``.
+Run ``native_calibration.py --reference`` afterwards, a new file has no native reference.
+
 ``--wavlm <split>`` caches WavLM-base-plus pooled layers and ``--fit --wavlm-layers`` adds
 them to the comparison (they are not used by the shipped scorer).
 """
@@ -21,14 +25,15 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from speechocean762 import DATASET_DIR, load_rows  # noqa: E402
-from word_model import load_cache, load_posteriors, logits_dir  # noqa: E402
+from word_model import english_on_generic_models, load_cache, load_posteriors, logits_dir  # noqa: E402
 
 logger = logging.getLogger("scorer")
 TARGETS = ("total", "accuracy", "fluency", "prosodic")
+GENERIC = False  # set by --generic
 
 
 def table_path(split):
-    return os.path.join(DATASET_DIR, f"utt_{split}.npz")
+    return os.path.join(DATASET_DIR, f"utt_{'generic_' if GENERIC else ''}{split}.npz")
 
 
 def wavlm_dir(split):
@@ -275,9 +280,10 @@ def fit(args):
         for target in TARGETS:
             models[target] = export_trees(_gbm_model(X_train, y_train[target]), names)
             calibration[target] = _recalibration(X_train, y_train[target])
-        data = {"lang": "en", "features": names, "models": models, "calibration": calibration,
+        data = {"lang": "generic" if GENERIC else "en", "features": names, "models": models, "calibration": calibration,
                 "trained_on": f"speechocean762 train split, {int(real_train.sum())} utterances"
-                              f" + {int((~real_train).sum())} synthetic negatives",
+                              f" + {int((~real_train).sum())} synthetic negatives"
+                              + (", features from the generic word model" if GENERIC else ""),
                 "metrics": {"test_split": "speechocean762 test, 2500 utterances", **metrics}}
         if match is not None:
             data["sentence_match"] = match.to_dict()
@@ -323,10 +329,15 @@ def main(argv=None):
     parser.add_argument("--out", help="where --fit writes the scorer (default: not written)")
     parser.add_argument("--wavlm-layers", action="store_true", help="also try WavLM pooled layers (needs --wavlm caches)")
     parser.add_argument("--lang", default="en")
+    parser.add_argument("--generic", action="store_true", help="the scorer of the other languages: English through the generic word model")
     parser.add_argument("--threads", type=int, default=8)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
     logging.getLogger("phonemizer").setLevel(logging.ERROR)
+    if args.generic:
+        global GENERIC
+        GENERIC = True
+        english_on_generic_models()
     if args.features:
         features(args.features, args.lang)
     elif args.wavlm:

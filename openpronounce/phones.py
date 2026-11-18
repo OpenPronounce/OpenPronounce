@@ -12,14 +12,13 @@ import re
 from functools import lru_cache
 from typing import NamedTuple
 
-import Levenshtein
+from rapidfuzz.distance import Levenshtein
 import numpy as np
 import torch
-from phonemizer import phonemize
-from phonemizer.separator import Separator
 
 from .device import get_device
 
+from . import g2p
 from .languages import DEFAULT_LANGUAGE, get_language
 
 logger = logging.getLogger(__name__)
@@ -134,13 +133,30 @@ def is_enabled():
 
 @lru_cache(maxsize=1)
 def _load_model():
-    from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+    """``(feature extractor, model)`` of the phone recognizer.
+
+    The checkpoint's own tokenizer class imports ``phonemizer`` (GPL) to turn text into
+    phones, which is never needed here: only the feature extractor and the vocabulary
+    file are read (see :func:`phone_vocab`).
+    """
+    from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForCTC
 
     logger.info("Loading %s", PHONE_MODEL_NAME)
-    processor = Wav2Vec2Processor.from_pretrained(PHONE_MODEL_NAME)
+    extractor = Wav2Vec2FeatureExtractor.from_pretrained(PHONE_MODEL_NAME)
     model = Wav2Vec2ForCTC.from_pretrained(PHONE_MODEL_NAME).to(get_device())
     model.eval()
-    return processor, model
+    return extractor, model
+
+
+@lru_cache(maxsize=1)
+def _vocab_ids():
+    """``{token: id}`` read from the checkpoint's ``vocab.json``."""
+    import json
+
+    from transformers.utils import cached_file
+
+    with open(cached_file(PHONE_MODEL_NAME, "vocab.json"), encoding="utf-8") as f:
+        return json.load(f)
 
 
 def normalize_phone(phone, lang=DEFAULT_LANGUAGE):
@@ -244,10 +260,9 @@ def phone_log_posteriors(audio_waveform, sampling_rate=SAMPLING_RATE, hidden_lay
 
 @lru_cache(maxsize=1)
 def phone_vocab():
-    """Vocabulary of the phone model as a tuple of tokens indexed by id."""
-    processor, _ = _load_model()
-    vocab = processor.tokenizer.get_vocab()
-    return tuple(token for token, _ in sorted(vocab.items(), key=lambda kv: kv[1]))
+    """Tokens of the phone recognizer, indexed by id."""
+    ids = _vocab_ids()
+    return tuple(token for token, _ in sorted(ids.items(), key=lambda item: item[1]))
 
 
 def recognize_phones(audio_waveform, sampling_rate=SAMPLING_RATE, normalize=True, lang=DEFAULT_LANGUAGE,
@@ -259,7 +274,6 @@ def recognize_phones(audio_waveform, sampling_rate=SAMPLING_RATE, normalize=True
     """
     from . import gop
 
-    processor, _ = _load_model()
     if hidden_layer == "auto":
         hidden_layer = gop.hidden_layer(lang)
     hidden = None
@@ -267,7 +281,7 @@ def recognize_phones(audio_waveform, sampling_rate=SAMPLING_RATE, normalize=True
         log_posteriors = phone_log_posteriors(audio_waveform, sampling_rate)
     else:
         log_posteriors, hidden = phone_log_posteriors(audio_waveform, sampling_rate, hidden_layer)
-    return decode_ctc(log_posteriors, phone_vocab(), processor.tokenizer.pad_token_id, lang, normalize, hidden)
+    return decode_ctc(log_posteriors, phone_vocab(), _vocab_ids().get("<pad>", 0), lang, normalize, hidden)
 
 
 def transcribe_phones(audio_waveform, sampling_rate=SAMPLING_RATE, normalize=True, lang=DEFAULT_LANGUAGE,
@@ -286,44 +300,16 @@ def transcribe_phones(audio_waveform, sampling_rate=SAMPLING_RATE, normalize=Tru
 _WORD_RE = re.compile(r"\b[\w']+\b")
 
 
-@lru_cache(maxsize=1024)
 def _expected_phones_by_word(text, lang=DEFAULT_LANGUAGE):
-    """Return ``(words, phones_per_word)`` for ``text``, phones normalized."""
-    words = [w.lower() for w in _WORD_RE.findall(text)]
-    if not words:
-        return (), ()
-    language = get_language(lang).espeak
-    try:
-        out = phonemize(
-            " ".join(words),
-            language=language,
-            backend="espeak",
-            strip=True,
-            preserve_punctuation=False,
-            separator=Separator(phone=" ", word=" | ", syllable=""),
-        )
-        groups = [g.split() for g in out.split("|")]
-        if len(groups) != len(words):
-            raise ValueError(f"expected {len(words)} words, phonemizer returned {len(groups)} groups")
-    except Exception as e:  # noqa: BLE001 - fall back to one call per word
-        logger.debug("batch phonemization failed (%s), falling back to per-word", e)
-        groups = []
-        for word in words:
-            try:
-                out = phonemize(word, language=language, backend="espeak", strip=True,
-                                preserve_punctuation=False,
-                                separator=Separator(phone=" ", word="", syllable=""))
-                groups.append(out.split())
-            except Exception:  # noqa: BLE001
-                groups.append([])
-    return tuple(words), tuple(tuple(g) for g in groups)
+    """Return ``(words, phones_per_word)`` for ``text``, as written by the G2P backend (see :mod:`openpronounce.g2p`)."""
+    return g2p.phones_by_word(text, lang)
 
 
 def get_expected_phones(text, lang=DEFAULT_LANGUAGE, normalize=True):
     """Return ``(words, phones_per_word)`` for ``text``. Words with no phones are kept as empty tuples.
 
     Phones are normalized for ``lang`` (see :func:`normalize_phones`) unless
-    ``normalize=False``, which returns espeak's own phones (length marks, reduced vowels).
+    ``normalize=False``, which returns the G2P backend's own phones (length marks, reduced vowels).
     """
     words, groups = _expected_phones_by_word(text, lang)
     if normalize:
@@ -495,6 +481,13 @@ def _word_reports(heard_phones, text_reference, lang=DEFAULT_LANGUAGE):
     return reports
 
 
+def _rescale(probability, source, target):
+    """Piecewise-linear map of a probability that sends ``source`` to ``target`` and keeps 0 and 1."""
+    if probability < source:
+        return probability * target / source
+    return target + (probability - source) * (1.0 - target) / (1.0 - source)
+
+
 def _gop_word_reports(recognition, words, groups, raw_groups, lang, threshold):
     """Word reports from forced alignment and the GOP word model (see :mod:`openpronounce.gop`).
 
@@ -525,8 +518,26 @@ def _gop_word_reports(recognition, words, groups, raw_groups, lang, threshold):
     phone_probabilities, word_probabilities = model.predict(analysis)
     if threshold is None:
         threshold = model.threshold
+    # The scorer reads the model's own probabilities. The report reads them on the scale of
+    # English: with the generic model, the language's threshold is moved onto the model's.
     bundle = {"analysis": analysis, "phone_probabilities": phone_probabilities,
               "word_probabilities": word_probabilities, "threshold": threshold}
+    language_threshold = get_language(lang).word_threshold if model.generic else None
+    if language_threshold:
+        word_probabilities = {position: _rescale(probability, language_threshold, model.threshold)
+                              for position, probability in word_probabilities.items()}
+    missing_model = gop.load_missing_model(lang)
+    missing = {}
+    if missing_model is not None:
+        missing = missing_model.predict(analysis, recognition.spans, recognition.confidences)
+    extra = []
+    for event in gop.extra_speech(analysis, recognition.spans, recognition.confidences):
+        extra.append({
+            "after": event["after"], "before": event["before"],
+            "start": round(event["start"] * gop.FRAME_SECONDS, 3), "end": round(event["end"] * gop.FRAME_SECONDS, 3),
+            "heard": [recognition.phones[i] for i in event["heard"]],
+        })
+    bundle["extra"] = extra
     by_word = {}
     for scored, probability in zip(analysis["phones"], phone_probabilities):
         by_word.setdefault(scored["word_index"], []).append((scored, float(probability)))
@@ -555,6 +566,15 @@ def _gop_word_reports(recognition, words, groups, raw_groups, lang, threshold):
             "mispronounced": bool(word_probabilities[position] >= threshold),
             "phones": phone_reports,
         })
+        if position in missing:
+            reports[-1]["missing_confidence"] = round(missing[position], 3)
+            if missing[position] >= missing_model.threshold:
+                # Not said at all: reported whatever the word model thinks of its sounds.
+                reports[-1].update(mispronounced=True, missing=True)
+        if g2p.is_guessed(words[position], lang):
+            # No dictionary entry: the expected phones are a guess, not a ground to blame the speaker.
+            reports[-1].update(mispronounced=False, guessed=True)
+            reports[-1].pop("missing", None)
     utterance = analysis["utterance"]
     reliability = {
         "log_likelihood_per_phone": round(utterance["ll_full_per_phone"], 3),
@@ -622,6 +642,7 @@ def compare_phones(heard_phones, text_reference, lang=DEFAULT_LANGUAGE, threshol
             "phone_distance": Levenshtein.distance(r["expected"], r["actual"]),
             "confidence": r["confidence"],
             "phones": r["phones"],
+            **({"missing": True} if r.get("missing") else {}),
         } for r in reports if r["mispronounced"]]
         result = {
             "expected_phones": [list(g) for g in groups],
@@ -631,6 +652,7 @@ def compare_phones(heard_phones, text_reference, lang=DEFAULT_LANGUAGE, threshol
             "errors": errors,
             "words_with_errors": [e["word"] for e in errors],
             "words": reports,
+            "extra": bundle["extra"],
             "alignment": reliability,
         }
         return (result, bundle) if return_analysis else result
@@ -639,6 +661,8 @@ def compare_phones(heard_phones, text_reference, lang=DEFAULT_LANGUAGE, threshol
     words_with_errors = []
     for report in _word_reports(heard_phones, text_reference, lang):
         edits, length = report["weighted_edits"], len(report["expected"])
+        if g2p.is_guessed(report["word"], lang):
+            continue
         if report["distance"] and (edits / length >= PHONE_ERROR_THRESHOLD or edits >= PHONE_ERROR_MIN_EDITS):
             errors.append({
                 "position": report["position"],

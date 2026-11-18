@@ -367,6 +367,373 @@ scores around 80 rather than 99. `developer1.wav` was "bad" for the formula beca
 acoustic distance to the gTTS voice (11.4); the model hears nothing the raters would reject,
 which may or may not be right, nobody rated it.
 
+## Who it works for (`groups.py`)
+
+```bash
+python benchmarks/groups.py        # shipped scorer on the test split, by age group and gender
+```
+
+| group | utterances | Pearson with the human total | MAE (0-10) |
+|---|---:|---:|---:|
+| adults | 1,220 | 0.851 | 0.7 |
+| children, 12 and under | 1,040 | 0.668 | 0.7 |
+| teenagers, 13 to 17 | 240 (12 speakers) | 0.456 | 0.7 |
+| women | | 0.827 | 0.7 |
+| men | | 0.756 | 0.7 |
+
+The error is the same everywhere; the correlation drops where the ratings have little
+spread (the teenagers) and where Wav2Vec2, trained on adults, recognizes less well (the
+children).
+
+## English without espeak
+
+The expected sounds of English come from the CMU pronouncing dictionary
+(`openpronounce.g2p`), the models are the ones trained with espeak's phones, unchanged.
+On the test split 12 % of the words get a different phone string, 0.12 % are missing
+from the dictionary. Word AUC 0.928 (0.924 with espeak), precision of the flagged words
+0.549 (0.53), total 0.791 (0.790), fluency 0.827.
+
+## Free speech (`free.py`)
+
+The prompt is hidden: the recording is transcribed (`facebook/wav2vec2-large-960h`,
+the word model of the library) and the transcript replaces the text. Each utterance is
+trimmed by `audio.split_speech`, as `free.assess` does.
+
+```bash
+python benchmarks/free.py --transcribe train && python benchmarks/free.py --transcribe test   # 50 min each on CPU
+python benchmarks/free.py --features train && python benchmarks/free.py --features test
+python benchmarks/free.py --fit --out openpronounce/models/free_scorer_en.json
+python benchmarks/free.py --report
+```
+
+Pearson with the human ratings, test split, 2,500 utterances:
+
+| system | total | accuracy | fluency | prosodic |
+|---|---:|---:|---:|---:|
+| read-speech scorer with the true prompt (reference) | 0.790 | 0.74 | 0.82 | 0.81 |
+| read-speech scorer fed with the transcript | 0.541 | 0.478 | 0.620 | 0.617 |
+| trained on the transcript, read-speech features | 0.674 | 0.643 | 0.753 | 0.740 |
+| trained, features that need no text at all | 0.671 | 0.631 | 0.745 | 0.732 |
+| trained, all free-speech features | 0.672 | 0.640 | 0.752 | 0.739 |
+| the same, blended with the recognizer's hidden states (shipped) | 0.708 | 0.681 | 0.787 | 0.777 |
+
+| subset | utterances | total | MAE (0-10) | word error rate against the prompt |
+|---|---:|---:|---:|---:|
+| adults | 1,220 | 0.820 | 0.78 | 0.45 |
+| children, 12 and under | 1,040 | 0.417 | 0.82 | 0.53 |
+| teenagers | 240 | 0.310 | 0.66 | 0.30 |
+| 1 to 4 words | 387 | 0.469 | 0.82 | 0.61 |
+| 5 to 8 words | 1,701 | 0.710 | 0.79 | 0.45 |
+| 9 words and more | 412 | 0.812 | 0.74 | 0.42 |
+
+The shipped English scorer averages two answers: the trees on the measures above, and
+a linear model on the hidden states of the phone recognizer (layer 20, mean and standard
+deviation over the frames), which keep what the measures drop. No model is added, the
+recognizer is already loaded. The weight of each half was chosen on the train split,
+speakers kept apart. The other languages keep the trees alone.
+
+The transcript is wrong on almost one word in two (these are learners, and the
+recognizer has no language model), yet the three trained systems are equivalent: what
+carries the score is how sure the phone recognizer is of what it hears, the rhythm and
+the pitch, not the words. Short utterances give too little of that. For children the
+free-speech score should not be used.
+
+### Longer recordings
+
+No rated corpus of long learner speech can be used here, so the test is built: six
+utterances of one speaker of the test split glued into one recording of about 22 s,
+scored by `free.assess` and compared with the mean of the six human totals. 30 speakers
+(17 adults, 13 under 18), so the intervals are wide: read these as orders of magnitude.
+
+| segmentation (`audio.split_speech`) | adults, Pearson | adults, MAE (0-100) | under 18, Pearson |
+|---|---:|---:|---:|
+| cut at pauses of 0.5 s, short parts joined (shipped) | 0.74 to 0.77 | 8 to 9 | 0.1 |
+| cut at pauses of 0.7 s | 0.67 to 0.72 | 9 to 11 | 0.1 |
+| cut at pauses of 0.5 s, short parts kept apart | 0.64 to 0.71 | 9 to 10 | 0.1 |
+| parts of up to 20 s (first version) | scores 20 points too low | | |
+
+The two figures are for the original silences between the utterances (1.2 s and more)
+and for silences shortened to 0.6 s. The scorer learned from single sentences: fed
+with 20 s at once it reads the pauses between sentences as hesitations, hence the cut
+at every pause of half a second. The mean score stays within 3 points of the raters'.
+
+Time on CPU (16 threads, models loaded, best of three):
+
+| recording | `--fast` | both recognizers, no synthetic reference | free speech |
+|---|---:|---:|---:|
+| 1.9 s | 0.45 s | 0.77 s | 0.77 s |
+| 18 s | 3.3 s | 6.2 s | 5.3 s |
+| 3 min | | | 52 s |
+
+Peak memory 3.6 GB with both recognizers loaded.
+
+## Missing words, extra speech (`missing_extra.py`)
+
+The learners of the corpus read what they are given, so the cases are built from the
+text: a word added to the sentence is a word the speaker did not say, a word removed
+from it is a word said in excess. Test split, 2,500 sentences.
+
+```bash
+python benchmarks/missing_extra.py --fit --out openpronounce/models/word_missing_generic.json
+python benchmarks/missing_extra.py --report
+```
+
+| | found | reported by mistake |
+|---|---:|---:|
+| word not said (2,500 words added to the texts) | 82.9 % | 0.71 % of the 15,967 words really read |
+| speech in excess (2,490 words removed from the texts) | 62.9 %, 69.8 % from 3 phones up | 2.8 % of the untouched sentences |
+
+Of the 114 read words called missing, 62 were rated below 5 by the raters. With them,
+the words reported go from precision 0.548 / recall 0.490 to 0.537 / 0.501. The missing
+word model is a logistic regression on nine alignment features (likelihood lost when the
+word is deleted, plausibility of its phones nearby, frames and heard phones per expected
+phone); its threshold lets 0.5 % of the read words of the train split through. Extra
+speech is a count: confident heard phones between two words, plus half of what each
+neighbour holds beyond its own phones, two or more. A learned detector on the same counts
+did no better (62 % found at the same false-alarm rate).
+
+## Other languages (`native_calibration.py`)
+
+No rated learner corpus exists for them, so three things are checked: what the generic
+models cost on English, how native speakers are treated in each language, and whether
+natives come out above learners where recordings of both can be had
+([further down](#free-speech-outside-english)).
+
+| on the English test split | English models | generic models |
+|---|---:|---:|
+| word AUC (accuracy below 5) | 0.924 | 0.911 |
+| precision / recall of the reported words | 0.533 / 0.506 | 0.463 / 0.491 |
+| Pearson with the human total | 0.790 | 0.771 |
+
+The generic word model drops the phone identity and the recognizer's hidden states; the
+variant that kept the hidden states did better on English (0.917) and worse elsewhere.
+
+```bash
+python benchmarks/word_model.py --fit --generic --no-embeddings --out openpronounce/models/word_mdd_generic.json
+python benchmarks/scorer.py --generic --features train && python benchmarks/scorer.py --generic --features test
+python benchmarks/scorer.py --generic --fit --out openpronounce/models/scorer_generic.json
+python benchmarks/free.py --generic --features train && python benchmarks/free.py --generic --features test
+python benchmarks/free.py --generic --fit --out openpronounce/models/free_scorer_generic.json
+python benchmarks/native_calibration.py english.csv --lang en --free --reference   # native readers of English
+```
+
+`--generic` reads English through the generic word model, as any other language is
+read. The last line writes into both scorers what native readers of English look like
+to them (here the 120 `dev` recordings of FLEURS), the reference of every
+`native_<lang>.json`.
+
+Native speakers come from [FLEURS](https://huggingface.co/datasets/google/fleurs)
+(Conneau et al., 2022, CC BY 4.0): people reading Wikipedia sentences on their own
+devices, 19 to 22 words and 9 to 13 seconds on average, far longer than the 2 to 10
+words the models learned from. Sentences with digits are left out. The `dev` split
+(120 recordings per language) served to choose the variants and the thresholds below;
+every figure of this table comes from the `test` split (220 recordings per language,
+26,600 words outside English), which played no part in those choices. `--fast` path.
+
+| | score | one in ten under | words reported | old rule | a replaced word is found | another sentence is caught | a missing word is found | speech in excess is found |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| English, its own models | 73.7 | 68 | 0.3 % | 3.0 % | 66 % | 100 % | 91 % | 87 % |
+| English, generic models | 73.9 | 69 | 0.4 % | 3.0 % | 78 % | 100 % | 91 % | 87 % |
+| French | 76.0 | 72 | 1.6 % | 6.2 % | 85 % | 95 % | 83 % | 76 % |
+| Spanish | 76.6 | 74 | 0.4 % | 5.4 % | 79 % | 96 % | 63 % | 85 % |
+| German | 76.3 | 72 | 0.9 % | 6.6 % | 83 % | 87 % | 74 % | 80 % |
+| Italian | 72.5 | 68 | 1.0 % | 12.8 % | 77 % | 95 % | 88 % | 82 % |
+| Portuguese | 74.6 | 70 | 0.9 % | 26.8 % | 74 % | 87 % | 83 % | 70 % |
+| Dutch | 75.7 | 72 | 0.8 % | 23.3 % | 75 % | 93 % | 55 % | 60 % |
+
+How to read it. A native speaker is not at 100: the scale is the one of the raters of
+speechocean762, and English natives themselves get 74 on these sentences (77 on those of
+12 words at most, 73 from 20 words up). Natives of the six other languages now sit
+between 72 and 77, which is the work of the native reference described below: without
+it Portuguese and Dutch natives were at 70 and 68. "Words reported" are false alarms,
+the speakers being native. The other columns are built from
+the text: one word replaced by another word of the corpus (three draws per recording),
+the text of another recording, one word added to the text, one word of four letters or
+more removed from it. A missing word is called so by mistake for 0.2 to 0.95 % of the
+words read, and speech in excess is found by mistake in 1.4 to 8.6 % of the untouched
+recordings (English: 8.6 %).
+
+Three settings per language came out of the `dev` split:
+
+- `Language.variants`, the recognizer tokens accepted for a phone espeak writes. Those
+  first found on a synthetic voice hold on real speakers (Portuguese natives go from 63
+  to 70, Dutch ones from 63 to 68, and their words are told from a replaced word better:
+  AUC 0.989 to 0.994 and 0.982 to 0.984). Dutch gets three more (ɪː heard eː, ɔː heard oː,
+  ɵ heard ə, y or ʊ: AUC 0.988). Wider sets, down to every phone natives are heard to say
+  otherwise, raise the native scores by up to 2 points and bring nothing to the detection:
+  left out.
+- `Language.word_threshold`. The generic model separates a native's own words from a
+  replaced word as well as in English (AUC 0.986 to 0.997, English 0.996), but its
+  probabilities are lower: at its own threshold (0.31, tuned on learners of English) a
+  replaced word is found 34 to 68 times in 100, against 78 in English. The threshold of
+  each language (0.06 to 0.22) is the one that finds it as often as in English on `dev`;
+  the reports show the probability moved onto the model's scale, so 0.31 means the same
+  everywhere. Assumption: what holds for a replaced word holds for a mispronounced one.
+  Only rated learners could tell.
+- `models/native_<lang>.json`, the native reference. The scorer learned on learners of
+  English what a good reading looks like to the recognizer, and the recognizer does not
+  agree with espeak equally well in every language: on Dutch and Portuguese natives the
+  share of sounds heard as another sound sits 4 standard deviations above that of
+  English natives, and the scorer reads that as an accent. So the 19 features that come
+  from the alignment are moved, before scoring, by the gap between the natives of the
+  language and those of English (the mean of 120 `dev` recordings on each side). Speech
+  rate, pauses, rhythm and pitch are left alone. On `test`:
+
+  | natives, score | French | Spanish | German | Italian | Portuguese | Dutch |
+  |---|---:|---:|---:|---:|---:|---:|
+  | without the reference | 74.1 | 76.6 | 73.4 | 73.0 | 69.6 | 68.2 |
+  | with it (shipped) | 76.0 | 76.6 | 76.3 | 72.5 | 74.6 | 75.7 |
+
+  The words reported and the three detections built on the word models do not move,
+  the reference touching the scorer only. What moves is the catch of another sentence
+  (German 82 to 87 %, Italian 98 to 95 %, French 96 to 95 %) and the score such a
+  recording gets, which rises from 18 to 31 in Portuguese and from 22 to 35 in Dutch:
+  it is flagged as unreliable, and that flag is what to read. Assumption: a learner
+  of Dutch strays from Dutch natives the way a learner of English strays from English
+  ones. The corpora below can only test it where the reference is small.
+
+What this does not say: how the scores follow human raters for learners of these
+languages. German, Portuguese and Dutch recordings are all tagged as male voices in the
+corpus, Italian ones almost all as female. A foreign name is pronounced by espeak with
+its foreign sounds and reported when read the local way ("Aerosmith" in a French
+sentence).
+
+Two more things these recordings showed:
+
+- **Long sentences.** The scorer never saw more than 10 words. Scoring a long reading by
+  windows of 10 words was tried on 300 readings made of 2 to 4 test utterances of one
+  speaker (20 words on average): Pearson with the mean human rating 0.88 as a whole and
+  0.90 by windows for the total, 0.73 and 0.85 for fluency, 0.81 and 0.86 for prosody.
+  Either way the score sits 9 to 10 points under the raters, and natives do not gain.
+  Not shipped: the readings are glued, which favours windows by construction.
+- **Quiet recordings.** The level does not change the score (the models normalize it):
+  20 dB less move it by a point. A 16-bit file loses 1.5 points at -60 dBFS and 9 at -70,
+  hence `too_quiet` below -60 (it was -40, which most of the Dutch recordings tripped).
+  FLEURS files are 32-bit floats, some at -65 dBFS: 16 % of the English ones are called
+  too quiet and are scored like the others.
+
+```bash
+python benchmarks/native_calibration.py manifest.csv --lang nl    # columns: audio, text
+```
+
+prints, for your own native recordings, the scores, the words reported, the threshold
+that matches English and the phones espeak and the recognizer disagree on. With
+`--shift native_nl.json` it writes the native reference of the language, and with
+`--free` it measures speech without a text as well.
+
+## Free speech outside English
+
+`models/free_scorer_generic.json` is the free-speech scorer trained with the generic
+word model. On the speechocean762 test split with the prompts hidden it follows the
+raters as the English one does: Pearson 0.671 with the total against 0.672, 0.787 for
+adults, 0.372 for children of 12 and under. The other languages use it with their
+native reference, which in free speech also covers the confidence of the recognizer.
+
+**Natives reading, text hidden.** FLEURS `test`, 120 recordings per language, the
+reference coming from `dev`.
+
+| | without the reference | with it (shipped) | the same recordings with their text | words mistranscribed |
+|---|---:|---:|---:|---:|
+| English, generic models | 70.7 | | 73.8 | 14 % |
+| French | 70.0 | 73.0 | 76.2 | 18 % |
+| Spanish | 72.8 | 72.3 | 76.6 | 7 % |
+| German | 66.3 | 72.5 | 76.1 | 12 % |
+| Italian | 69.6 | 70.4 | 72.8 | 8 % |
+| Portuguese | 61.1 | 72.1 | 74.5 | 15 % |
+| Dutch | 58.3 | 70.8 | 75.8 | 21 % |
+
+Without its text a native reading loses 2 to 5 points, in English too. Between two
+natives the two scores hardly agree (Pearson 0.1 to 0.5 across recordings): natives
+stand within 3 to 6 points of each other, and that is the noise of the measure.
+
+**Natives speaking without a script.** 100 stretches of 8 to 25 seconds per corpus,
+4 to 13 per speaker.
+
+| corpus | score | fluency | prosody | words mistranscribed |
+|---|---:|---:|---:|---:|
+| VoxPopuli, English (speakers of every country) | 72.4 | 65.6 | 66.1 | 19 % |
+| VoxPopuli, French | 73.1 | 65.9 | 65.7 | 21 % |
+| VoxPopuli, Spanish | 72.6 | 65.1 | 64.1 | 13 % |
+| VoxPopuli, German | 71.6 | 65.5 | 65.1 | 18 % |
+| VoxPopuli, Italian | 70.8 | 63.8 | 62.9 | 31 % |
+| VoxPopuli, Dutch | 71.7 | 65.1 | 64.0 | 26 % |
+| CIEMPIESS, Mexican radio talk | 67.2 | 56.7 | 56.1 | 21 % |
+| CORAA-MUPE, life stories told by eight elderly Brazilians | 65.7 | 58.6 | 58.9 | 45 % |
+
+Speeches in parliament score like read sentences. Talk that is really unprepared loses
+5 to 7 points, all of them in fluency and prosody: the scorer learned from read
+sentences, where a pause or a restart is a fault. A fluent native who hesitates is
+marked down for it, and so will a fluent learner be.
+
+**Natives against learners.** Two public corpora hold both, without ratings:
+[L2FOC](https://hdl.handle.net/11403/bianca-maria-de-paolis) (French spoken by Italians,
+Italian spoken by French speakers, natives of both, short answers to questions about
+pictures) and [Heroico](https://www.openslr.org/39/) (Spanish read by Mexican cadets
+and by American ones). The figure is the chance that a native picked at random scores
+above a learner picked at random, speakers being compared on the mean of 12 to 15
+answers of about 3 seconds; in brackets the 95 % interval.
+
+| | natives | learners | free speech | with the transcript as the text |
+|---|---:|---:|---:|---:|
+| French, answers | 82.8 (18 speakers) | 78.2 (14) | 0.93 (0.83 to 1.00) | 0.84 (0.68 to 0.96) |
+| Italian, answers | 79.6 (16) | 76.6 (15) | 0.74 (0.54 to 0.90) | 0.73 (0.53 to 0.90) |
+| Spanish, read sentences | 82.9 (8) | 81.4 (10) | 0.78 (0.53 to 0.97) | 0.72 (0.45 to 0.96) |
+
+The order is the right one in the three languages and the gap is small: 1.5 to 4.6
+points between the two groups, on recordings mostly too short to be called reliable
+(under 3 seconds of speech). The native reference changes nothing to that order
+(0.93, 0.77 and 0.76 without it). The level of the learners is not in the public
+files, so nothing says how far from the natives a rater would have put them.
+
+**The same people reading a text aloud: the order does not hold.** Every L2FOC speaker
+also reads a text, about a minute of speech, scored here whole as free speech (13 to
+16 parts per recording).
+
+| | natives | learners | a native above a learner |
+|---|---:|---:|---:|
+| French | 74.8 (18 speakers) | 72.8 (18) | 0.71 (0.52 to 0.87) |
+| Italian | 69.5 (16) | 71.5 (18) | 0.36 (0.18 to 0.57) |
+
+In Italian the learners come out on top. The Italians read faster than the French
+speakers reading Italian (12.8 sounds per second against 11.0), the recognizer is less
+sure of what it hears in quick speech, and the learners read slowly and clearly a
+language whose spelling tells how to say it. The scorer cannot tell quick native
+speech from unclear speech. The natives of one language being the learners of the
+other, the two effects can be told apart: averaged over both languages, being native
+is worth 3.8 points in the answers and nothing in the reading, where the French
+speakers sit 2 points above the Italians whatever the language.
+
+What this does not say: how the scores follow a teacher's judgement, in any of these
+languages. German, Portuguese and Dutch, the three languages the reference moves most,
+have no learner recordings here at all.
+
+## Telephone band (`telephone.py`)
+
+The models were trained on 16 kHz recordings. A phone line carries 8 kHz at best. 500
+utterances of the test split were sent through two channels and scored again: resampled
+to 8 kHz and back, then the same with the band of a land line (300 to 3,400 Hz) and
+G.711 coding.
+
+```bash
+python benchmarks/telephone.py --sample 500 && python benchmarks/telephone.py --report
+```
+
+| | Pearson with the raters | adults only | mean score | a score moves by | one in ten by more than |
+|---|---:|---:|---:|---:|---:|
+| sentence known, 16 kHz | 0.813 | 0.854 | 72.5 | | |
+| sentence known, 8 kHz | 0.789 | 0.852 | 72.0 | 2.8 | 6.9 |
+| sentence known, phone line | 0.778 | 0.844 | 71.6 | 3.6 | 7.5 |
+| free speech, 16 kHz | 0.684 | 0.784 | 73.6 | | |
+| free speech, 8 kHz | 0.655 | 0.788 | 72.5 | 2.5 | 6.0 |
+| free speech, phone line | 0.636 | 0.775 | 72.3 | 3.5 | 7.8 |
+
+The agreement with the raters holds, for adults almost untouched; the mean drops by 1 to
+3 points and 5 % of the words are reported in every condition. What a line does change
+is one person's score: 3.5 points on average between the same recording at 16 kHz
+and on the phone, enough to cross a pass mark. The channel is simulated on clean
+recordings, without line noise, mobile codec or lost packets, so a real call will do
+worse than this.
+
 ## Word-level detection (0.3.0 rule)
 
 `benchmarks/word_detection.py` calibrates the rule that flags a word as mispronounced,
