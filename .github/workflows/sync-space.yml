@@ -1,7 +1,7 @@
 name: Sync Hugging Face Space
 
 # Needs a repository secret HF_TOKEN (write access) at
-# https://github.com/Halleck45/OpenPronounce/settings/secrets/actions
+# https://github.com/OpenPronounce/OpenPronounce/settings/secrets/actions
 on:
   push:
     branches: [ main ]

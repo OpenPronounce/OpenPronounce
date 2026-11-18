@@ -29,6 +29,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from speechocean762 import DATASET_DIR, load_rows, sample_rows  # noqa: E402
+from word_model import load_posteriors  # noqa: E402
 
 LOGITS_DIR = os.path.join(DATASET_DIR, "logits")
 LABEL_THRESHOLDS = (5, 7)
@@ -104,6 +105,26 @@ def word_rows(labels, vocab, use_posteriors=True):
     return rows
 
 
+def model_rows(labels, vocab):
+    """One dict per word from the forced-alignment word model (``phones.compare_phones`` default path)."""
+    import numpy as np
+
+    from openpronounce import phones
+
+    rows = []
+    for k, lab in enumerate(labels):
+        # the full test split cache also holds the hidden states the word model may read
+        log_posteriors, hidden = load_posteriors("test", lab["utt"])
+        result = phones.compare_phones(phones.decode_ctc(log_posteriors, vocab, hidden=hidden), lab["text"].lower())
+        for report in result.get("words", []):
+            accuracy = lab["words"][report["position"]]["accuracy"]
+            for threshold in LABEL_THRESHOLDS:
+                report[f"bad<{threshold}"] = accuracy < threshold
+            report["tune"] = k % 2 == 0
+            rows.append(report)
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Rules and metrics
 # ---------------------------------------------------------------------------
@@ -130,7 +151,15 @@ GRID = list(itertools.product([t / 20 for t in range(4, 25)], [1.5, 2, 2.5, 3, 4
 
 
 def precision_at_recall(rows, key, label, target):
-    """Best precision over the grid of thresholds among operating points with recall >= target."""
+    """Best precision over the grid of thresholds among operating points with recall >= target.
+
+    ``key="confidence"`` (the word model's probability) sweeps every probability instead of the grid.
+    """
+    if key == "confidence":
+        from sklearn.metrics import precision_recall_curve
+
+        precision, recall, _ = precision_recall_curve([r[label] for r in rows], [r[key] for r in rows])
+        return float(max(precision[recall >= target])) if (recall >= target).any() else 0.0
     best = 0.0
     for threshold, min_edits in GRID:
         m = metrics(rows, rule(threshold, min_edits, key), label)
@@ -160,19 +189,26 @@ def report(args):
     systems = [
         ("0.2.1 rule (edit distance >= 50 % or >= 3)", without, rule(0.5, 3, "distance"), "distance"),
         ("confidence rule, no posteriors", without, current, "weighted_edits"),
-        ("confidence rule + posteriors (default)", with_posteriors, current, "weighted_edits"),
+        ("confidence rule + posteriors (0.3)", with_posteriors, current, "weighted_edits"),
     ]
+    from openpronounce import gop
+
+    model = gop.load_model("en")
+    if model is not None:
+        systems.append(("forced alignment + word model (default)", model_rows(labels, vocab),
+                        lambda row: row["mispronounced"], "confidence"))
     n_tune = sum(1 for r in with_posteriors if r["tune"])
     print(f"{len(labels)} utterances, {len(with_posteriors)} words ({n_tune} in the tuning half); "
-          f"rule: weighted edits >= {phones.PHONE_ERROR_THRESHOLD:.0%} of the phones or >= {phones.PHONE_ERROR_MIN_EDITS}")
+          f"rule: weighted edits >= {phones.PHONE_ERROR_THRESHOLD:.0%} of the phones or >= {phones.PHONE_ERROR_MIN_EDITS}"
+          + (f"; word model threshold {model.threshold:.2f} (trained on the train split)" if model else ""))
     for threshold in LABEL_THRESHOLDS:
         label = f"bad<{threshold}"
         n_bad = sum(r[label] for r in with_posteriors)
         print(f"\nHuman word accuracy < {threshold} = mispronounced ({n_bad} words, {n_bad / len(with_posteriors):.1%})")
         print(f"{'system':44} {'split':8} {'P':>6} {'R':>6} {'F1':>6} {'flagged':>8} {'P@R.5':>6} {'P@R.7':>6}")
         for name, rows, flag, key in systems:
-            for split, keep in (("tune", True), ("held-out", False)):
-                subset = [r for r in rows if r["tune"] == keep]
+            for split, keep in (("tune", True), ("held-out", False), ("all", None)):
+                subset = [r for r in rows if keep is None or r["tune"] == keep]
                 m = metrics(subset, flag, label)
                 print(f"{name:44} {split:8} {m['precision']:6.3f} {m['recall']:6.3f} {m['f1']:6.3f} {m['flagged']:8.1%} "
                       f"{precision_at_recall(subset, key, label, 0.5):6.3f} {precision_at_recall(subset, key, label, 0.7):6.3f}")

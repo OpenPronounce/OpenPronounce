@@ -77,7 +77,7 @@
         renderExamples();
 
         $('language-select').addEventListener('change', onLanguageChange);
-        $('expected-text').addEventListener('input', hideTextHint);
+        $('expected-text').addEventListener('input', () => { hideTextHint(); updateRecordHint(); });
 
         $('record-btn').addEventListener('click', onRecordClick);
         setupMicSelector();
@@ -163,15 +163,18 @@
     function renderExamples() {
         const container = $('examples');
         container.querySelectorAll('button').forEach(b => b.remove());
-        (EXAMPLES[state.lang] || EXAMPLES.en).forEach(text => {
+        // The last chip empties the field: no sentence means free speech
+        (EXAMPLES[state.lang] || EXAMPLES.en).concat(['']).forEach(text => {
             const chip = document.createElement('button');
             chip.type = 'button';
-            chip.textContent = text;
-            chip.className = 'text-xs px-2.5 py-1 rounded-full border border-neutral-200 bg-white text-neutral-600 '
-                + 'hover:border-accent-500 hover:text-accent-700 transition-colors';
+            chip.textContent = text || 'No sentence, just talk';
+            chip.className = 'text-xs px-2.5 py-1 rounded-full border bg-white transition-colors '
+                + (text ? 'border-neutral-200 text-neutral-600 hover:border-accent-500 hover:text-accent-700'
+                    : 'border-dashed border-neutral-300 text-neutral-600 hover:border-accent-500 hover:text-accent-700');
             chip.addEventListener('click', () => {
                 $('expected-text').value = text;
                 hideTextHint();
+                updateRecordHint();
             });
             container.appendChild(chip);
         });
@@ -185,6 +188,19 @@
 
     function tokenize(text) {
         return text.match(WORD_RE) || [];
+    }
+
+    // No sentence: the recording is scored as free speech (POST /free)
+    function isFreeSpeech() {
+        return !tokenize(expectedText()).length;
+    }
+
+    function updateRecordHint() {
+        if (!recorder.isRecording()) {
+            $('record-hint').textContent = isFreeSpeech()
+                ? 'Tap to record, then talk about anything for a few sentences'
+                : 'Tap to record, then say the sentence';
+        }
     }
 
     function requireText() {
@@ -217,7 +233,7 @@
             recorder.stop();
             return;
         }
-        if (state.busy || !requireText()) {
+        if (state.busy) {
             return;
         }
         hideRecordError();
@@ -255,7 +271,7 @@
         btn.setAttribute('aria-label', 'Record');
         $('mic-icon').classList.remove('hidden');
         $('stop-icon').classList.add('hidden');
-        $('record-hint').textContent = 'Tap to record, then say the sentence';
+        updateRecordHint();
         $('record-timer').classList.add('hidden');
         $('record-timer').textContent = '00:00';
         $('mic-select-btn').disabled = false;
@@ -490,9 +506,10 @@
     // ---------------------------------------------------------------- analysis
 
     async function analyze() {
-        if (state.busy || !state.blob || !requireText()) {
+        if (state.busy || !state.blob) {
             return;
         }
+        const freeSpeech = isFreeSpeech();
         state.busy = true;
         $('record-btn').disabled = true;
         $('analyze-btn').disabled = true;
@@ -500,11 +517,13 @@
 
         const formData = new FormData();
         formData.append('file', state.blob, state.filename || 'audio.webm');
-        formData.append('expected_text', expectedText());
+        if (!freeSpeech) {
+            formData.append('expected_text', expectedText());
+        }
         formData.append('lang', state.lang);
 
         try {
-            const response = await fetch('/pronunciation', { method: 'POST', body: formData });
+            const response = await fetch(freeSpeech ? '/free' : '/pronunciation', { method: 'POST', body: formData });
             if (!response.ok) {
                 let detail = '';
                 try {
@@ -515,10 +534,14 @@
                     : 'The server could not analyze this recording. Try again in a moment.');
             }
             const data = await response.json();
-            if (!data || !data.differences) {
+            if (!data || !(freeSpeech ? Array.isArray(data.words) : data.differences)) {
                 throw new Error('The server returned an unexpected answer. Try again in a moment.');
             }
-            renderResult(data);
+            if (freeSpeech) {
+                renderFreeResult(data);
+            } else {
+                renderResult(data);
+            }
         } catch (err) {
             showError(err && err.message ? err.message : 'Could not reach the server. Check your connection and try again.');
         } finally {
@@ -581,8 +604,12 @@
         });
 
         renderScore(Math.round(data.score || 0), state.errorsByIndex.size, state.words.length, data.transcribe);
+        renderTrust(data);
         renderChips();
         renderHeard(data);
+        $('transcript').parentElement.classList.remove('hidden');
+        $('heard-row').classList.remove('hidden');
+        $('details').classList.remove('hidden');
 
         $('word-detail').classList.add('hidden');
         state.chartsDirty = true;
@@ -600,6 +627,79 @@
         const firstFlagged = state.words.findIndex((_, i) => state.errorsByIndex.has(i));
         if (firstFlagged >= 0) {
             selectWord(firstFlagged, false);
+        }
+    }
+
+    // Free speech: no expected sentence, so no word is "wrong". Words the recognizers
+    // disagree on are shown as unclear, and there is no per-sound detail to open.
+    function renderFreeResult(data) {
+        state.result = data;
+        state.words = data.words.map(w => w.word);
+        state.errorsByIndex = new Map();
+        state.selected = null;
+        state.chartsDirty = false;
+
+        const unclear = data.words.filter(w => w.unclear).length;
+        renderScore(Math.round(data.score || 0), 0, state.words.length, '');
+        if (data.score === null || data.score === undefined) {
+            $('verdict').textContent = 'No score for this language yet';
+            $('verdict-sub').textContent = 'No free-speech model is installed for it. The transcript is below.';
+        } else if (!state.words.length) {
+            $('verdict').textContent = 'We heard no words';
+            $('verdict-sub').textContent = 'Check that the recording started before you spoke.';
+        } else {
+            const seconds = Math.round(data.speech_duration || 0);
+            $('verdict').textContent = `${state.words.length} words in ${seconds} second${seconds === 1 ? '' : 's'} of speech`;
+            $('verdict-sub').textContent = unclear
+                ? `${unclear} word${unclear > 1 ? 's were' : ' was'} unclear. Without the sentence we cannot say which sounds went wrong.`
+                : 'Every word came through. Type the sentence to get feedback on each sound.';
+        }
+        renderTrust(data);
+
+        const container = $('word-chips');
+        container.innerHTML = '';
+        data.words.forEach(word => {
+            const chip = document.createElement('span');
+            chip.textContent = word.word;
+            chip.className = 'px-3 py-1.5 rounded-lg border text-base font-medium ' + (word.unclear
+                ? 'bg-amber-50 border-amber-200 text-amber-800'
+                : 'bg-neutral-50 border-neutral-200 text-neutral-700');
+            if (word.unclear) {
+                chip.title = `Unclear: we expected /${word.expected}/ and heard /${word.heard}/`;
+            }
+            container.appendChild(chip);
+        });
+
+        // The chips already are the transcript
+        $('transcript').parentElement.classList.toggle('hidden', state.words.length > 0);
+        $('transcript').textContent = 'nothing we could recognize';
+        $('heard-row').classList.add('hidden');
+        $('extra-row').classList.add('hidden');
+        $('details').classList.add('hidden');
+        $('word-detail').classList.add('hidden');
+
+        setView('result');
+        const result = $('result');
+        result.classList.remove('reveal');
+        void result.offsetWidth;
+        result.classList.add('reveal');
+        result.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // The three sub-scores, and the reasons not to trust them when the server gives some
+    function renderTrust(data) {
+        const scores = data.scores;
+        const sub = $('subscores');
+        sub.classList.toggle('hidden', !scores);
+        if (scores) {
+            sub.textContent = `Accuracy ${Math.round(scores.accuracy)} · Fluency ${Math.round(scores.fluency)} · Prosody ${Math.round(scores.prosodic)}`;
+        }
+        const warning = $('unreliable');
+        const reasons = data.reliable === false ? (data.reasons || []) : [];
+        warning.classList.toggle('hidden', !reasons.length);
+        if (reasons.length) {
+            const text = reasons.join('; ');
+            warning.textContent = `Do not trust this score: ${text}.`;
         }
     }
 
@@ -671,8 +771,8 @@
                 : 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100');
             if (error) {
                 const conf = typeof error.confidence === 'number' ? `${Math.round(error.confidence * 100)} % sure` : 'flagged';
-                chip.title = error.actual === ''
-                    ? `Not heard (${conf}). Expected /${error.expected}/`
+                chip.title = (error.missing || error.actual === '')
+                    ? `Not said (${conf}). Expected /${error.expected}/`
                     : `Flagged, ${conf}. Expected /${error.expected}/, heard /${error.actual}/`;
             } else {
                 const phones = expectedPhones[index];
@@ -683,7 +783,22 @@
         });
     }
 
+    // Speech the sentence does not contain, with the words it was heard between
+    function renderExtra(data) {
+        const extra = (data.differences && data.differences.extra) || [];
+        const words = new Map(((data.differences && data.differences.words) || []).map(w => [w.position, w.word]));
+        $('extra-row').classList.toggle('hidden', !extra.length);
+        $('extra-speech').textContent = extra.map(e => {
+            const sounds = `/${e.heard.join(' ')}/`;
+            if (e.after !== null && e.before !== null) {
+                return `${sounds} between "${words.get(e.after)}" and "${words.get(e.before)}"`;
+            }
+            return e.after !== null ? `${sounds} after "${words.get(e.after)}"` : `${sounds} before "${words.get(e.before)}"`;
+        }).join('; ');
+    }
+
     function renderHeard(data) {
+        renderExtra(data);
         const transcript = (data.transcribe || '').trim();
         $('transcript').textContent = transcript ? transcript.toLowerCase() : 'nothing we could recognize';
 
@@ -738,8 +853,8 @@
             heardEl.className = 'text-base text-neutral-500';
         } else {
             const conf = typeof error.confidence === 'number' ? Math.round(error.confidence * 100) : null;
-            status.textContent = error.actual === ''
-                ? (conf === null ? 'Not heard' : `Not heard, ${conf} % sure`)
+            status.textContent = (error.missing || error.actual === '')
+                ? (conf === null ? 'Not said' : `Not said, ${conf} % sure`)
                 : (conf === null ? 'Flagged' : `Flagged, ${conf} % sure`);
             status.className = 'text-sm font-medium text-red-600';
 
@@ -764,7 +879,7 @@
             }
             expectedEl.appendChild(document.createTextNode('/'));
 
-            if (error.actual === '') {
+            if ((error.missing || error.actual === '')) {
                 heardEl.textContent = 'nothing';
                 heardEl.className = 'text-base text-neutral-500';
             } else {

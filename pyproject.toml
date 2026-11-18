@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openpronounce"
 version = "0.4.0"
-description = "Open-source, phoneme-level English pronunciation assessment (Wav2Vec2 + DTW). Score a recording, list mispronounced words, get prosody curves."
+description = "Open-source, phoneme-level pronunciation assessment (Wav2Vec2 forced alignment, models trained on human ratings). Score a recording, list mispronounced words, get prosody curves."
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "Jean-François Lépine" }]
 requires-python = ">=3.10"
 keywords = [
@@ -18,7 +18,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Education",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -36,8 +36,7 @@ dependencies = [
     "scipy>=1.10",
     "scikit-learn>=1.2",
     "fastdtw>=0.3",
-    "phonemizer>=3.2",
-    "Levenshtein>=0.20",
+    "rapidfuzz>=3.0",
     "gTTS>=2.3",
 ]
 
@@ -66,15 +65,19 @@ dev = [
 
 [project.scripts]
 openpronounce = "openpronounce.cli:main"
+openpronounce-evaluate = "openpronounce.evaluate:main"
 
 [project.urls]
-Homepage = "https://github.com/Halleck45/OpenPronounce"
-Repository = "https://github.com/Halleck45/OpenPronounce"
-Issues = "https://github.com/Halleck45/OpenPronounce/issues"
+Homepage = "https://github.com/OpenPronounce/OpenPronounce"
+Repository = "https://github.com/OpenPronounce/OpenPronounce"
+Issues = "https://github.com/OpenPronounce/OpenPronounce/issues"
 "Blog post" = "https://blog.lepine.pro/en/ai-wav2vec-pronunciation-vectorization/"
 
 [tool.setuptools]
 packages = ["openpronounce"]
+
+[tool.setuptools.package-data]
+openpronounce = ["models/*.json", "data/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

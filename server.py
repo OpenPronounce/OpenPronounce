@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from openpronounce import __version__, audio, speech
+from openpronounce import __version__, audio, free, speech
 from openpronounce.languages import DEFAULT_LANGUAGE, LANGUAGES, get_language
 
 logger = logging.getLogger("openpronounce.server")
@@ -60,6 +60,19 @@ async def api_analyze_pronunciation(file: UploadFile = File(...), expected_text:
         return speech.compare_audio_with_text(sound, expected_text, lang=lang)
     except Exception:
         logger.exception("pronunciation analysis failed")
+        raise HTTPException(status_code=500, detail="Something went wrong")
+
+
+@app.post("/free")
+async def api_assess_free_speech(file: UploadFile = File(...), lang: str = Form(DEFAULT_LANGUAGE)):
+    """Score ``file`` without an expected text: transcript, scores and unclear words (see ``openpronounce.free``)."""
+    lang = _validate_lang(lang)
+    try:
+        wav_file = _save_upload_as_wav(file)
+        sound = audio.load(wav_file)
+        return free.assess(sound, lang=lang)
+    except Exception:
+        logger.exception("free speech analysis failed")
         raise HTTPException(status_code=500, detail="Something went wrong")
 
 

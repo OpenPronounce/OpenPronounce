@@ -165,3 +165,80 @@ class TestText2Speech(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSplitSpeech(unittest.TestCase):
+
+    @staticmethod
+    def _burst(seconds, sr=16000):
+        t = np.arange(int(seconds * sr)) / sr
+        return (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+
+    def _recording(self, pattern, sr=16000):
+        """``pattern``: seconds of speech (positive) and silence (negative)."""
+        return np.concatenate([self._burst(s, sr) if s > 0 else np.zeros(int(-s * sr), dtype=np.float32) for s in pattern])
+
+    def test_short_recording_is_one_span_without_the_silence(self):
+        spans = audio.split_speech(self._recording([-1, 2, -1]))
+        self.assertEqual(len(spans), 1)
+        start, end = spans[0]
+        self.assertAlmostEqual(start / 16000, 0.85, delta=0.1)
+        self.assertAlmostEqual(end / 16000, 3.15, delta=0.1)
+
+    def test_recording_is_cut_at_every_long_pause(self):
+        spans = audio.split_speech(self._recording([3, -1, 4, -0.2, 2, -1, 3]))
+        self.assertEqual(len(spans), 3)
+        self.assertAlmostEqual((spans[1][1] - spans[1][0]) / 16000, 6.5, delta=0.2)
+        for (_, end), (start, _) in zip(spans, spans[1:]):
+            self.assertLessEqual(end, start)
+
+    def test_long_span_is_cut_at_its_longest_pause(self):
+        spans = audio.split_speech(self._recording([6, -0.2, 5, -0.4, 6]), max_seconds=12)
+        self.assertEqual(len(spans), 2)
+        self.assertAlmostEqual(spans[0][1] / 16000, 11.4, delta=0.3)
+        self.assertTrue(all((end - start) / 16000 <= 12.4 for start, end in spans))
+
+    def test_short_span_joins_its_nearest_neighbour(self):
+        spans = audio.split_speech(self._recording([3, -2, 0.5, -0.6, 3]))
+        self.assertEqual(len(spans), 2)
+        self.assertAlmostEqual(spans[1][0] / 16000, 4.85, delta=0.1)
+
+    def test_speech_without_a_pause_is_cut_in_equal_parts(self):
+        spans = audio.split_speech(self._recording([50]), max_seconds=20)
+        self.assertEqual(len(spans), 3)
+        self.assertTrue(all((end - start) / 16000 <= 20.4 for start, end in spans))
+
+    def test_silence_and_empty(self):
+        self.assertEqual(audio.split_speech(np.zeros(16000, dtype=np.float32)), [])
+        self.assertEqual(audio.split_speech(np.zeros(0, dtype=np.float32)), [])
+
+
+class TestQuality(unittest.TestCase):
+
+    @staticmethod
+    def _voice(seconds=3.0, amplitude=0.3, noise=0.0, sr=16000):
+        t = np.arange(int(seconds * sr)) / sr
+        envelope = (np.sin(2 * np.pi * 1.5 * t) > 0).astype(np.float32)  # speech bursts and pauses
+        rng = np.random.default_rng(0)
+        return (amplitude * envelope * np.sin(2 * np.pi * 200 * t) + noise * rng.standard_normal(len(t))).astype(np.float32)
+
+    def test_clean_recording(self):
+        report = audio.quality(self._voice(noise=0.001))
+        self.assertEqual(report["issues"], [])
+        self.assertAlmostEqual(report["duration"], 3.0, places=2)
+        self.assertGreater(report["snr_db"], 30)
+
+    def test_silent_and_too_short(self):
+        self.assertEqual(audio.quality(np.zeros(1600, dtype=np.float32))["issues"], ["too_short", "silent"])
+        self.assertEqual(audio.quality(np.zeros(0, dtype=np.float32))["issues"], ["too_short", "silent"])
+
+    def test_too_quiet(self):
+        self.assertIn("too_quiet", audio.quality(self._voice(amplitude=0.0002))["issues"])
+
+    def test_clipped(self):
+        report = audio.quality(np.clip(self._voice(amplitude=3.0), -1, 1))
+        self.assertIn("clipped", report["issues"])
+        self.assertGreater(report["clipping_ratio"], 0.01)
+
+    def test_noisy(self):
+        self.assertIn("noisy", audio.quality(self._voice(amplitude=0.1, noise=0.08))["issues"])

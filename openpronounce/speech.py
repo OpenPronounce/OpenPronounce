@@ -4,16 +4,15 @@ import logging
 import re
 from functools import lru_cache
 
-import Levenshtein
 import librosa
 import numpy as np
 import torch
 from fastdtw import fastdtw
-from phonemizer import phonemize
+from rapidfuzz.distance import Levenshtein
 from scipy.spatial.distance import euclidean
 from sklearn.preprocessing import MinMaxScaler
 
-from . import audio, phones
+from . import audio, g2p, phones, scorer
 from .device import get_device
 from .languages import DEFAULT_LANGUAGE, get_language
 
@@ -110,23 +109,14 @@ def _words(text):
     return _WORD_RE.findall(text)
 
 
-@lru_cache(maxsize=4096)
 def _phonemize_word(word, lang=DEFAULT_LANGUAGE):
-    """Return the IPA phonemes of a single word (espeak first, festival as fallback).
+    """Return the IPA of a single word as a one-item tuple (see :mod:`openpronounce.g2p`).
 
-    The word is lower-cased first: espeak spells upper-case words letter by letter
-    ("IT" -> /aɪtiː/), which would flag every word of an upper-case sentence as wrong.
+    The word is lower-cased first: an upper-case sentence must not be spelled letter by letter.
     """
-    word = word.lower()
-    language = get_language(lang).espeak
-    for backend in ("espeak", "festival"):
-        try:
-            return tuple(
-                phonemize(word, language=language, backend=backend, strip=True, preserve_punctuation=False).split()
-            )
-        except Exception as e:  # noqa: BLE001 - try the next backend
-            logger.debug("phonemize(%r) failed with %s: %s", word, backend, e)
-    return ()
+    _, groups = g2p.phones_by_word(word.lower(), lang)
+    ipa = "".join(p for group in groups for p in group)
+    return (ipa,) if ipa else ()
 
 
 def get_phonemes(text, lang=DEFAULT_LANGUAGE):
@@ -331,66 +321,118 @@ SCORE_WEIGHTS = {"acoustic": 0.3, "phonemes": 0.4, "words": 0.3}
 
 
 def compute_pronunciation_score(acoustic_distance, phoneme_error_rate, word_error_rate, lang=DEFAULT_LANGUAGE):
-    """Combine length-independent measures into a 0-100 score.
+    """Combine length-independent measures into a 0-100 score (the formula used before the trained scorer).
 
     - ``acoustic_distance``: mean per-step DTW distance between Wav2Vec2 embeddings,
       mapped linearly from ``Language.acoustic_good`` (100) to ``acoustic_good +``
-      :data:`ACOUSTIC_DISTANCE_SPAN` (0); for English that is 6 to 15. 30%.
+      :data:`ACOUSTIC_DISTANCE_SPAN` (0); for English that is 6 to 15. 30%. ``None``
+      (acoustic term skipped) spreads its weight over the two other terms.
     - ``phoneme_error_rate``: edited phonemes / expected phonemes, 40%.
     - ``word_error_rate``: edited words / expected words, 30%.
 
     Every component is clipped to [0, 100] before weighting.
     """
-    good = get_language(lang).acoustic_good
-    acoustic_score = 100 * (1 - (acoustic_distance - good) / ACOUSTIC_DISTANCE_SPAN)
+    clip = lambda x: min(100.0, max(0.0, x))  # noqa: E731
     phoneme_score = 100 * (1 - phoneme_error_rate)
     word_score = 100 * (1 - word_error_rate)
-
-    clip = lambda x: min(100.0, max(0.0, x))  # noqa: E731
+    weights = dict(SCORE_WEIGHTS)
+    if acoustic_distance is None:
+        acoustic_score = 0.0
+        total = weights["phonemes"] + weights["words"]
+        weights = {"acoustic": 0.0, "phonemes": weights["phonemes"] / total, "words": weights["words"] / total}
+    else:
+        good = get_language(lang).acoustic_good
+        acoustic_score = 100 * (1 - (acoustic_distance - good) / ACOUSTIC_DISTANCE_SPAN)
     final_score = (
-        SCORE_WEIGHTS["acoustic"] * clip(acoustic_score)
-        + SCORE_WEIGHTS["phonemes"] * clip(phoneme_score)
-        + SCORE_WEIGHTS["words"] * clip(word_score)
+        weights["acoustic"] * clip(acoustic_score)
+        + weights["phonemes"] * clip(phoneme_score)
+        + weights["words"] * clip(word_score)
     )
     return round(clip(final_score), 2)
 
 
+#: Unexpected speech makes the scores unreliable from this many phones on, and from this
+#: share of the expected ones (one stray word in a long text does not).
+EXTRA_SPEECH_MIN_PHONES = 5
+EXTRA_SPEECH_RATIO = 0.25
+
+
 def compare_audio_with_text(audio_1, text_reference, sampling_rate=SAMPLING_RATE, use_phone_model=None,
-                            lang=DEFAULT_LANGUAGE):
+                            lang=DEFAULT_LANGUAGE, reference_audio=None, reference_embeddings=None,
+                            prosody=True, acoustic=True, transcription=True):
     """Assess how well ``audio_1`` (16 kHz mono waveform) pronounces ``text_reference``.
 
     ``lang`` selects the language (see :data:`openpronounce.languages.LANGUAGES`);
     it drives the reference TTS voice, the phonemizer and the word transcription model.
 
-    Returns a JSON-serializable dict with ``score`` (0-100), ``distance``,
-    ``differences`` (per-word errors, phonemes, feedback), ``transcribe``,
-    ``language`` and ``prosody`` (``f0`` and ``energy`` contours).
+    The score comes from a model trained on human ratings when the language has one
+    (English, see :mod:`openpronounce.scorer`): ``scores`` then also carries the
+    ``accuracy``, ``fluency`` and ``prosodic`` dimensions. Otherwise ``score`` is the
+    weighted formula of :func:`compute_pronunciation_score`, also returned as
+    ``formula_score`` in every case.
+
+    The acoustic term of that formula compares ``audio_1`` with a native reading of the
+    sentence. By default that reading is synthesized (see
+    :func:`openpronounce.audio.text2speech`); pass ``reference_audio`` (a 16 kHz mono
+    waveform, e.g. a human recording of the same sentence) or ``reference_embeddings``
+    (its :func:`extract_embeddings` output, handy when the same reference is reused many
+    times) to use it instead. ``acoustic=False`` skips it altogether (no TTS, no DTW,
+    about 1.5 s saved on CPU): ``distance`` and ``acoustic_distance`` are then ``None``.
+
+    ``transcription=False`` skips the word transcription, hence the second Wav2Vec2
+    checkpoint: with ``acoustic=False`` only the phone recognizer is loaded and run (half
+    the download, about half the time). The trained scores and the word reports are the
+    same; ``transcribe`` and ``formula_score`` are ``None``. It needs a language with a
+    trained scorer (English).
+
+    ``prosody=False`` skips the pitch and energy contours (pYIN is the slowest step
+    after the neural models) and leaves ``prosody`` out of the result.
+
+    Returns a JSON-serializable dict with ``score`` (0-100), ``scores``, ``formula_score``,
+    ``distance``, ``differences`` (per-word errors, phonemes, feedback), ``transcribe``,
+    ``language``, ``audio_quality`` (see :func:`openpronounce.audio.quality`), ``reliable``
+    with its ``reasons`` and ``prosody`` (``f0`` and ``energy`` contours). ``reliable`` is
+    ``False`` when the recording does not match the sentence or is too quiet, clipped,
+    noisy or short to be scored fairly: the scores are still returned, do not show them
+    to a learner as they are.
 
     When the phone recognizer is enabled (default, see :mod:`openpronounce.phones`),
     ``differences.errors`` and ``differences.phoneme_error_rate`` come from phones
-    recognized directly in the audio; otherwise they are derived from the word
-    transcription.
+    recognized directly in the audio; ``differences.words`` details every word and
+    ``differences.alignment`` says whether the recording matches the sentence at all
+    (``reliable``, ``sentence_probability``: another sentence, or only part of it, gets
+    a low probability and a low score). Otherwise they are derived from the word transcription.
     """
     if use_phone_model is None:
         use_phone_model = phones.is_enabled()
     lang = get_language(lang).code
 
-    emb_1 = extract_embeddings(audio_1, sampling_rate)
+    distance = acoustic_distance = None
+    if acoustic:
+        emb_1 = extract_embeddings(audio_1, sampling_rate)
+        if reference_embeddings is not None:
+            emb_2 = np.asarray(reference_embeddings)
+        else:
+            if reference_audio is None:
+                reference_file = audio.text2speech(text_reference, lang=lang)
+                reference_audio = audio.load(reference_file, sr=sampling_rate)
+            emb_2 = extract_embeddings(reference_audio, sampling_rate)
+        distance, path = fastdtw(emb_1, emb_2, dist=euclidean)
+        acoustic_distance = round(distance / max(1, len(path)), 3)
+        distance = int(distance)
 
-    reference_file = audio.text2speech(text_reference, lang=lang)
-    audio_2 = audio.load(reference_file, sr=sampling_rate)
-    emb_2 = extract_embeddings(audio_2, sampling_rate)
+    if transcription:
+        differences = compare_transcriptions(transcribe(audio_1, lang), text_reference, lang)
+    else:
+        if not use_phone_model or scorer.load_scorer(lang) is None:
+            raise ValueError(f"transcription=False needs the phone model and a trained scorer for {lang!r}")
+        differences = {"transcribe": None, "word_error_rate": None, "phoneme_error_rate": None, "errors": [],
+                       "words_with_errors": [], "feedback": ""}
 
-    distance, path = fastdtw(emb_1, emb_2, dist=euclidean)
-    acoustic_distance = distance / max(1, len(path))
-    distance = int(distance)
-
-    transcription = transcribe(audio_1, lang)
-    differences = compare_transcriptions(transcription, text_reference, lang)
-
+    scores = None
     if use_phone_model:
         recognition = phones.recognize_phones(audio_1, sampling_rate, lang=lang)
-        phone_result = phones.compare_phones(recognition, text_reference, lang)
+        phone_result, analysis = phones.compare_phones(recognition, text_reference, lang, return_analysis=True)
         differences.update({
             "errors": phone_result["errors"],
             "words_with_errors": phone_result["words_with_errors"],
@@ -400,27 +442,57 @@ def compare_audio_with_text(audio_1, text_reference, sampling_rate=SAMPLING_RATE
             "heard_phones_confidence": phone_result["heard_phones_confidence"],
             "feedback": _feedback(phone_result["words_with_errors"]),
         })
+        for key in ("words", "extra", "alignment"):
+            if key in phone_result:
+                differences[key] = phone_result[key]
+        if analysis is not None and scorer.load_scorer(lang) is not None:
+            features = scorer.features(analysis["analysis"], analysis["phone_probabilities"],
+                                       analysis["word_probabilities"], analysis["threshold"], audio_1, sampling_rate)
+            scores = scorer.score(features, lang)
+            if "sentence_probability" in scores:
+                # the trained match model replaces the threshold-based flag of compare_phones
+                probability = scores.pop("sentence_probability")
+                differences["alignment"]["sentence_probability"] = probability
+                differences["alignment"]["reliable"] = probability >= 0.5
 
-    score = compute_pronunciation_score(
-        acoustic_distance, differences["phoneme_error_rate"], differences["word_error_rate"], lang
-    )
+    formula_score = None
+    if differences["word_error_rate"] is not None:
+        formula_score = compute_pronunciation_score(
+            acoustic_distance, differences["phoneme_error_rate"], differences["word_error_rate"], lang
+        )
 
-    energy = extract_energy(audio_1)
-    f0 = interpolate_f0(extract_f0(audio_1, sampling_rate))
+    quality = audio.quality(audio_1, sampling_rate)
+    reasons = [f"recording {issue.replace('_', ' ')}" for issue in quality["issues"]]
+    word_reports = differences.get("words", [])
+    missing = [w["word"] for w in word_reports if w.get("missing")]
+    if not differences.get("alignment", {}).get("reliable", True):
+        if missing and 2 * len(missing) <= len(word_reports):
+            reasons.insert(0, "not said: " + ", ".join(missing))
+        else:
+            reasons.insert(0, "the recording does not match the sentence")
+    unexpected = sum(len(e["heard"]) for e in differences.get("extra", []))
+    if unexpected >= max(EXTRA_SPEECH_MIN_PHONES, EXTRA_SPEECH_RATIO * sum(len(w["expected"]) for w in word_reports)):
+        reasons.append("speech that is not in the sentence")
 
-    return {
-        "score": score,
+    result = {
+        "score": scores["total"] if scores else formula_score,
+        "scores": scores,
+        "formula_score": formula_score,
         "distance": distance,
-        "acoustic_distance": round(acoustic_distance, 3),
+        "acoustic_distance": acoustic_distance,
         "differences": differences,
         "feedback": differences["feedback"],
         "transcribe": differences["transcribe"],
         "language": lang,
-        "prosody": {
-            "f0": f0.tolist(),
-            "energy": energy.tolist(),
-        },
+        "audio_quality": quality,
+        "reliable": not reasons,
+        "reasons": reasons,
     }
+    if prosody:
+        energy = extract_energy(audio_1)
+        f0 = interpolate_f0(extract_f0(audio_1, sampling_rate))
+        result["prosody"] = {"f0": f0.tolist(), "energy": energy.tolist()}
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -47,3 +47,19 @@ class TestServer(unittest.TestCase):
         languages = self.client.get("/languages").json()
         self.assertEqual(languages["default"], "en")
         self.assertIn({"code": "en", "name": "English"}, languages["languages"])
+
+
+class TestFreeSpeechRoute(unittest.TestCase):
+
+    @patch("server.free.assess", return_value={"mode": "free", "score": 70.0})
+    def test_free(self, assess):
+        import io
+        import numpy as np
+        import soundfile as sf
+        buf = io.BytesIO()
+        sf.write(buf, np.zeros(16000, dtype="float32"), 16000, format="WAV")
+        buf.seek(0)
+        response = TestClient(server.app).post("/free", files={"file": ("rec.wav", buf, "audio/wav")})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"mode": "free", "score": 70.0})
+        self.assertEqual(assess.call_args.kwargs, {"lang": "en"})

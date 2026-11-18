@@ -25,7 +25,7 @@ One column, `max-w-2xl`, warm accent (`accent-500 = #ea580c`) used only for acti
    SpeechSynthesis on "Hear it"), "We heard" (transcription) and "Your sounds" (heard phones, low
    confidence in grey), then a `<details>` with the phoneme trace and the pitch / energy charts,
    then "Try again" / "Replay my recording".
-7. Footer: GitHub, MIT, `pip install openpronounce`, link to the article.
+7. Footer: GitHub, AGPL-3.0, `pip install openpronounce`, link to the article.
 
 ## States and events
 
