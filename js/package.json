@@ -1,0 +1,22 @@
+{
+  "name": "openpronounce",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Read-speech pronunciation assessment in the browser: a JavaScript port of the OpenPronounce scoring pipeline.",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./node": "./src/node.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build:data": "node tools/build-lexicon.mjs && node tools/copy-models.mjs",
+    "demo": "node tools/serve.mjs"
+  },
+  "dependencies": {
+    "onnxruntime-web": "1.22.0"
+  },
+  "engines": { "node": ">=20" }
+}
