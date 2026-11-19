@@ -1,0 +1,8 @@
+{
+  "name": "openpronounce-browser-bench",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "onnxruntime-web": "^1.22.0"
+  }
+}

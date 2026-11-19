@@ -4,6 +4,14 @@ Uses ``facebook/wav2vec2-lv-60-espeak-cv-ft``, a Wav2Vec2 model fine-tuned to em
 espeak IPA phones directly from audio, so pronunciation errors are detected inside
 words without going through a word transcription (which silently "corrects" what
 the learner said).
+
+``$OPENPRONOUNCE_PHONEME_MODEL`` selects another checkpoint (hub id or local folder) with the
+same vocabulary. A checkpoint can carry an ``openpronounce`` block in its ``config.json``:
+``hidden_projection`` names a small linear map (``file``, ``source_layer``, ``layer``) that turns
+one of its own layers into the stand-in for ``layer`` of the default model, the one the word
+model reads; ``models`` is the suffix of the model files trained on its features
+(``word_mdd_en_<models>.json``, see :func:`openpronounce.gop.model_names`). The distilled
+wav2vec2-base student is such a checkpoint.
 """
 
 import logging
@@ -23,7 +31,8 @@ from .languages import DEFAULT_LANGUAGE, get_language
 
 logger = logging.getLogger(__name__)
 
-PHONE_MODEL_NAME = os.environ.get("OPENPRONOUNCE_PHONEME_MODEL", "facebook/wav2vec2-lv-60-espeak-cv-ft")
+DEFAULT_PHONE_MODEL = "facebook/wav2vec2-lv-60-espeak-cv-ft"
+PHONE_MODEL_NAME = os.environ.get("OPENPRONOUNCE_PHONEME_MODEL", DEFAULT_PHONE_MODEL)
 SAMPLING_RATE = 16000
 
 # Every wrong phone of a word gets an error confidence (0-1, see :func:`compare_phones`).
@@ -131,13 +140,34 @@ def is_enabled():
     return PHONE_MODEL_NAME not in ("", "0", "off", "false", "no")
 
 
+def model_info():
+    """The ``openpronounce`` block of the phone model's ``config.json`` (``{}`` for the default model or without one)."""
+    if not is_enabled():
+        return {}
+    return _model_info(PHONE_MODEL_NAME)
+
+
+@lru_cache(maxsize=4)
+def _model_info(name):
+    if name == DEFAULT_PHONE_MODEL:
+        return {}
+    import json
+
+    from transformers.utils import cached_file
+
+    with open(cached_file(name, "config.json"), encoding="utf-8") as f:
+        return json.load(f).get("openpronounce", {})
+
+
 @lru_cache(maxsize=1)
 def _load_model():
-    """``(feature extractor, model)`` of the phone recognizer.
+    """``(feature extractor, model, projection)`` of the phone recognizer.
 
     The checkpoint's own tokenizer class imports ``phonemizer`` (GPL) to turn text into
     phones, which is never needed here: only the feature extractor and the vocabulary
-    file are read (see :func:`phone_vocab`).
+    file are read (see :func:`phone_vocab`). ``projection`` is ``None``, or
+    ``(source_layer, layer, linear)`` for a checkpoint that maps one of its layers onto
+    ``layer`` of the default model (see the module docstring).
     """
     from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForCTC
 
@@ -145,7 +175,20 @@ def _load_model():
     extractor = Wav2Vec2FeatureExtractor.from_pretrained(PHONE_MODEL_NAME)
     model = Wav2Vec2ForCTC.from_pretrained(PHONE_MODEL_NAME).to(get_device())
     model.eval()
-    return extractor, model
+    return extractor, model, _load_projection(model_info().get("hidden_projection"))
+
+
+def _load_projection(info):
+    if not info:
+        return None
+    from safetensors.torch import load_file
+    from transformers.utils import cached_file
+
+    weights = load_file(cached_file(PHONE_MODEL_NAME, info["file"]))
+    out_dim, in_dim = weights["weight"].shape
+    linear = torch.nn.Linear(in_dim, out_dim)
+    linear.load_state_dict(weights)
+    return int(info["source_layer"]), int(info["layer"]), linear.to(get_device()).eval()
 
 
 @lru_cache(maxsize=1)
@@ -247,15 +290,24 @@ def phone_log_posteriors(audio_waveform, sampling_rate=SAMPLING_RATE, hidden_lay
 
     With ``hidden_layer`` (an int, 0 being the input of the first transformer layer), returns
     ``(log_posteriors, hidden)`` where ``hidden`` is the ``(frames, dim)`` output of that layer.
+    A checkpoint with a hidden projection only gives the layer it stands for, through that projection.
     """
-    processor, model = _load_model()
+    processor, model, projection = _load_model()
+    if hidden_layer is not None and projection is not None and hidden_layer != projection[1]:
+        raise ValueError(f"{PHONE_MODEL_NAME} only gives the hidden states of layer {projection[1]} "
+                         f"(projected from its layer {projection[0]}), not {hidden_layer}")
     inputs = processor(audio_waveform, sampling_rate=sampling_rate, return_tensors="pt", padding=True)
     with torch.no_grad():
         output = model(inputs.input_values.to(get_device()), output_hidden_states=hidden_layer is not None)
+        if hidden_layer is not None:
+            if projection is None:
+                hidden = output.hidden_states[hidden_layer][0]
+            else:
+                hidden = projection[2](output.hidden_states[projection[0]][0])
     log_posteriors = torch.log_softmax(output.logits[0].float(), dim=-1).cpu().numpy()
     if hidden_layer is None:
         return log_posteriors
-    return log_posteriors, output.hidden_states[hidden_layer][0].float().cpu().numpy()
+    return log_posteriors, hidden.float().cpu().numpy()
 
 
 @lru_cache(maxsize=1)

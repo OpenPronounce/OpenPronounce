@@ -14,7 +14,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from speechocean762 import DATASET_DIR  # noqa: E402
+from speechocean762 import DATASET_DIR, DOWNLOAD_DIR  # noqa: E402
 
 TARGETS = ("total", "accuracy", "fluency", "prosodic")
 AGE_GROUPS = (("children, 12 and under", 0, 12), ("teenagers, 13 to 17", 13, 17), ("adults", 18, 200))
@@ -39,7 +39,7 @@ def speaker_metadata(split="test"):
     """``{speaker: (gender, age)}`` from the parquet file of ``split``."""
     import pyarrow.parquet as pq
 
-    path = os.path.join(DATASET_DIR, "data", f"{split}-00000-of-00001.parquet")
+    path = os.path.join(DOWNLOAD_DIR, "data", f"{split}-00000-of-00001.parquet")
     rows = pq.read_table(path, columns=["speaker", "gender", "age"]).to_pylist()
     return {str(row["speaker"]): (row["gender"], int(row["age"])) for row in rows}
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added: a distilled phone model, `OpenPronounce/wav2vec2-base-phones-en` on the Hugging Face Hub, a wav2vec2-base (95 M parameters) trained to stand in for `facebook/wav2vec2-lv-60-espeak-cv-ft` on English. Select it with `OPENPRONOUNCE_PHONEME_MODEL=OpenPronounce/wav2vec2-base-phones-en`; the word model and the scorer trained on its output (`models/word_mdd_en_student.json`, `models/scorer_en_student.json`) are then picked automatically. On the speechocean762 test split: word AUC 0.938 and Pearson 0.802 with the human total, against 0.928 and 0.790 for the large model; `assess()` without transcription runs about twice as fast on CPU (2.8 s against 6.2 s for 18 s of audio, 8 threads). The checkpoint also ships in ONNX, fp32 and int8 (123 MB), for ONNX Runtime and the browser. English read speech only: transcription and free speech still use `facebook/wav2vec2-large-960h`. Training and evaluation scripts in `experiments/browser/`.
+- Added: a phone model can carry an `openpronounce` block in its `config.json` (`hidden_projection`, `models`), read by `phones.model_info()`; `gop.find_model()` looks for the model files of that recognizer first.
+- Fixed: the figures measured with the espeak G2P before 1.0 are marked as such in `benchmarks/README.md`; `docs/how-it-works.md` gives the precision and recall of the dictionary G2P (55 % and 49 %).
+
 ## 1.0.0 (2026-11-18)
 
 Two changes break compatibility with 0.4:
