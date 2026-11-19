@@ -9,7 +9,8 @@ Two modes:
     python benchmarks/speechocean762.py --report --out benchmarks/results/speechocean762.csv
 
 The dataset (parquet, with audio) is downloaded from the Hugging Face hub
-(``mispeech/speechocean762``) into ``~/.cache/openpronounce/speechocean762``.
+(``mispeech/speechocean762``) into ``~/.cache/openpronounce/speechocean762``. The caches the
+benchmarks compute go there too, or to ``$OPENPRONOUNCE_BENCHMARK_DIR``.
 """
 
 import argparse
@@ -24,7 +25,10 @@ import time
 from collections import defaultdict
 
 DATASET_REPO = "mispeech/speechocean762"
-DATASET_DIR = os.path.join(os.path.expanduser("~"), ".cache", "openpronounce", "speechocean762")
+DOWNLOAD_DIR = os.path.join(os.path.expanduser("~"), ".cache", "openpronounce", "speechocean762")
+# Where the benchmarks keep what they compute (posteriors, feature tables). Point it elsewhere
+# to measure another phone recognizer without touching the caches of the default one.
+DATASET_DIR = os.environ.get("OPENPRONOUNCE_BENCHMARK_DIR", DOWNLOAD_DIR)
 PARQUET = {"test": "data/test-00000-of-00001.parquet", "train": "data/train-00000-of-00001.parquet"}
 
 # A word is "mispronounced" for the human raters when its accuracy is below this (0-10 scale).
@@ -49,8 +53,8 @@ logger = logging.getLogger("benchmark")
 def download(split="test"):
     from huggingface_hub import hf_hub_download
 
-    os.makedirs(DATASET_DIR, exist_ok=True)
-    return hf_hub_download(DATASET_REPO, PARQUET[split], repo_type="dataset", local_dir=DATASET_DIR)
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    return hf_hub_download(DATASET_REPO, PARQUET[split], repo_type="dataset", local_dir=DOWNLOAD_DIR)
 
 
 def load_rows(split="test"):

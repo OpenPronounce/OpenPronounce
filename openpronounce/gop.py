@@ -10,6 +10,9 @@ is deleted or replaced by a close one (alignment-free GOP), its duration, its co
 A small logistic model trained on speechocean762 (``models/word_mdd_<lang>.json``)
 turns these scores into the probability that a phone, then a word, is mispronounced.
 Without a model for the language, the probabilities fall back on the generic model.
+A phone recognizer other than the default one can have models of its own, trained on its
+features: ``word_mdd_<lang>_<suffix>.json``, the suffix being declared by the recognizer
+(:func:`openpronounce.phones.model_info`); they come before the models of the default one.
 """
 
 import json
@@ -53,10 +56,45 @@ def model_path(name):
     return None
 
 
-def installed_models():
-    """One dict per model file that would be loaded: ``kind``, ``lang``, ``path``, ``bundled``, ``license``, ``trained_on``, ``metrics``.
+def recognizer_suffix():
+    """Suffix of the model files trained on the features of the selected phone recognizer, or ``None``."""
+    from . import phones
 
-    A file shadowed by an earlier directory is not listed. Shipped models follow the licence of the package; a
+    return phones.model_info().get("models")
+
+
+def model_names(kind, lang=DEFAULT_LANGUAGE):
+    """File names tried, in order, for a model of ``kind`` and ``lang``.
+
+    The language's own model, then the generic one; each preceded by its variant for the
+    selected phone recognizer when that recognizer declares a suffix (``scorer_en_student.json``).
+    """
+    suffix = recognizer_suffix()
+    names = []
+    for name in dict.fromkeys((lang, "generic")):
+        if suffix:
+            names.append(f"{kind}_{name}_{suffix}.json")
+        names.append(f"{kind}_{name}.json")
+    return names
+
+
+def find_model(kind, lang=DEFAULT_LANGUAGE):
+    """Path of the first of :func:`model_names` found in :func:`models_dirs`, or ``None``."""
+    suffix = recognizer_suffix()
+    for name in model_names(kind, lang):
+        path = model_path(name)
+        if path is not None:
+            if suffix and not name.endswith(f"_{suffix}.json"):
+                logger.info("No %s trained for the %s recognizer: using %s", MODEL_KINDS[kind], suffix, name)
+            return path
+    return None
+
+
+def installed_models():
+    """One dict per model file that would be loaded: ``kind``, ``lang``, ``recognizer``, ``path``, ``bundled``, ``license``, ``trained_on``, ``metrics``.
+
+    ``recognizer`` is the suffix of a model trained for another phone recognizer
+    (``word_mdd_en_student.json``), ``None`` otherwise. A file shadowed by an earlier directory is not listed. Shipped models follow the licence of the package; a
     model from another directory says so in its ``license`` key, or is ``unspecified``.
     """
     found = {}
@@ -71,12 +109,13 @@ def installed_models():
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             bundled = os.path.abspath(directory) == os.path.abspath(MODELS_DIR)
+            lang, _, recognizer = name[len(kind) + 1:-len(".json")].partition("_")
             found[name] = {
-                "kind": kind, "lang": name[len(kind) + 1:-len(".json")], "path": path, "bundled": bundled,
+                "kind": kind, "lang": lang, "recognizer": recognizer or None, "path": path, "bundled": bundled,
                 "license": data.get("license", PACKAGE_LICENSE if bundled else "unspecified"),
                 "trained_on": data.get("trained_on"), "metrics": data.get("metrics", {}),
             }
-    return sorted(found.values(), key=lambda m: (m["lang"], m["kind"]))
+    return sorted(found.values(), key=lambda m: (m["lang"], m["kind"], m["recognizer"] or ""))
 # Seconds per frame of the wav2vec2 phone model (320 samples at 16 kHz).
 FRAME_SECONDS = 0.02
 # An expected phone whose log posterior stays below this on all its frames is implausible
@@ -514,12 +553,9 @@ class WordModel:
 
 @lru_cache(maxsize=8)
 def load_model(lang=DEFAULT_LANGUAGE):
-    """The :class:`WordModel` of ``lang``, or the generic (no phone identity) model, or ``None``."""
-    for name in (f"word_mdd_{lang}.json", "word_mdd_generic.json"):
-        path = model_path(name)
-        if path is not None:
-            return WordModel.load(path)
-    return None
+    """The :class:`WordModel` of ``lang``, or the generic (no phone identity) model, or ``None`` (see :func:`model_names`)."""
+    path = find_model("word_mdd", lang)
+    return WordModel.load(path) if path is not None else None
 
 
 def hidden_layer(lang=DEFAULT_LANGUAGE):
@@ -596,13 +632,12 @@ class MissingModel:
 
 @lru_cache(maxsize=8)
 def load_missing_model(lang=DEFAULT_LANGUAGE):
-    """The :class:`MissingModel` of ``lang``, or the generic one, or ``None``."""
-    for name in (f"word_missing_{lang}.json", "word_missing_generic.json"):
-        path = model_path(name)
-        if path is not None:
-            with open(path, encoding="utf-8") as f:
-                return MissingModel(json.load(f))
-    return None
+    """The :class:`MissingModel` of ``lang``, or the generic one, or ``None`` (see :func:`model_names`)."""
+    path = find_model("word_missing", lang)
+    if path is None:
+        return None
+    with open(path, encoding="utf-8") as f:
+        return MissingModel(json.load(f))
 
 
 def extra_speech(analysis, spans, confidences):

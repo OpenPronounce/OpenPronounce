@@ -58,6 +58,6 @@ Without an expected text (`assess(waveform)`, `POST /free`), the result has its 
 | `OPENPRONOUNCE_ESPEAK` | `espeak-ng` on the PATH | path of the espeak-ng program, needed for every language other than English |
 | `OPENPRONOUNCE_MODELS_DIR` | none | directories searched for model files before the shipped ones: add a language (its `native_<lang>.json`, or models of its own) or replace a model. `openpronounce --models` lists what is loaded, with licence and metrics |
 | `OPENPRONOUNCE_DEVICE` | auto | `cpu`, `cuda`, `cuda:1`, `mps` |
-| `OPENPRONOUNCE_PHONEME_MODEL` | espeak model | `off` to skip the phone recognizer (word errors then come from the transcription, less precise) |
+| `OPENPRONOUNCE_PHONEME_MODEL` | espeak model | `off` to skip the phone recognizer (word errors then come from the transcription, less precise). A hub id or a folder selects another recognizer with the same phones, such as the distilled wav2vec2-base (`wav2vec2-base-phones-en`, English read speech, three times smaller): its word model and scorer (`*_en_student.json`) are picked with it. Transcription, free speech included, stays on `wav2vec2-large-960h` |
 | `OPENPRONOUNCE_CACHE_DIR` | system temp | where synthesized references are cached |
 | `HF_HOME` | `~/.cache/huggingface` | where the models live; `HF_HUB_OFFLINE=1` works once they are there |

@@ -17,7 +17,8 @@ def _print_models():
         if headline and isinstance(headline[1], dict):
             headline = (f"{headline[0]} {next(iter(headline[1]))}", next(iter(headline[1].values())))
         metric = f", {headline[0]} {headline[1]:.3f}" if headline else ""
-        print(f"{model['lang']}  {gop.MODEL_KINDS[model['kind']]:16s} {model['license']}{metric}")
+        lang = model["lang"] + (f" ({model['recognizer']})" if model.get("recognizer") else "")
+        print(f"{lang}  {gop.MODEL_KINDS[model['kind']]:16s} {model['license']}{metric}")
         print(f"    {model['path']}")
         if model["trained_on"]:
             print(f"    trained on {model['trained_on']}")

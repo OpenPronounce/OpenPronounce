@@ -280,7 +280,7 @@ Test split, 43,781 phones with a human score and 15,967 words (2026-10-26):
 | word, accuracy < 5 | min GOP margin alone | 0.883 | 0.324 | 0.319 | 0.236 | |
 | word, accuracy < 5 | logistic phone + logistic word | 0.900 | 0.399 | 0.387 | 0.268 | P 0.381, R 0.507 |
 | word, accuracy < 5 | MLP phone + trees word, GOP features | 0.913 | 0.456 | 0.503 | 0.322 | P 0.425, R 0.582, 7.4 % flagged |
-| word, accuracy < 5 | **same + embedding (shipped)** | **0.924** | **0.525** | **0.537** | **0.376** | **P 0.533, R 0.506, 5.1 % flagged** |
+| word, accuracy < 5 | **same + embedding (shipped, espeak G2P; 0.928 with the dictionary, see below)** | **0.924** | **0.525** | **0.537** | **0.376** | **P 0.533, R 0.506, 5.1 % flagged** |
 | word, accuracy < 7 (8.1 %) | 0.3.0 rule | 0.760 | 0.268 | | | P 0.264, R 0.648 |
 | word, accuracy < 7 | MLP phone + trees word, GOP features | 0.872 | 0.462 | 0.448 | 0.300 | P 0.494, R 0.451 |
 | word, accuracy < 7 | same + embedding (shipped) | 0.886 | 0.518 | 0.498 | 0.343 | P 0.610, R 0.386 |
@@ -501,11 +501,11 @@ natives come out above learners where recordings of both can be had
 
 | on the English test split | English models | generic models |
 |---|---:|---:|
-| word AUC (accuracy below 5) | 0.924 | 0.911 |
-| precision / recall of the reported words | 0.533 / 0.506 | 0.463 / 0.491 |
+| word AUC (accuracy below 5) | 0.928 | 0.911 |
+| precision / recall of the reported words | 0.549 / 0.490 | 0.463 / 0.491 |
 | Pearson with the human total | 0.790 | 0.771 |
 
-The generic word model drops the phone identity and the recognizer's hidden states; the
+The English column uses the dictionary G2P of 1.0; the generic column was measured with espeak and not measured again. The generic word model drops the phone identity and the recognizer's hidden states; the
 variant that kept the hidden states did better on English (0.917) and worse elsewhere.
 
 ```bash

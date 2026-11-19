@@ -202,14 +202,11 @@ def load_scorer(lang=DEFAULT_LANGUAGE, kind="scorer"):
     """The :class:`Scorer` of ``lang`` or ``None``. ``kind="free_scorer"`` is the one for speech without an expected text.
 
     A language without its own scorer gets the generic one of that kind, trained on English
-    learners with the features of the generic word model.
+    learners with the features of the generic word model. A phone recognizer that declares a
+    suffix gets the scorer trained on its features first (:func:`openpronounce.gop.model_names`).
     """
-    names = [f"{kind}_{lang}.json", f"{kind}_generic.json"]
-    for name in names:
-        path = gop.model_path(name)
-        if path is not None:
-            return Scorer.load(path)
-    return None
+    path = gop.find_model(kind, lang)
+    return Scorer.load(path) if path is not None else None
 
 
 @lru_cache(maxsize=16)

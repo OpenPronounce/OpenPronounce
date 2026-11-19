@@ -63,7 +63,7 @@ class TestModelsDir(unittest.TestCase):
         self._write("scorer_xx.json", _scorer("xx", license="Commercial"))
         self._write("scorer_en.json", _scorer("en"))
         self._write("notes.json", {})
-        models = {(m["lang"], m["kind"]): m for m in gop.installed_models()}
+        models = {(m["lang"], m["kind"]): m for m in gop.installed_models() if m["recognizer"] is None}
         self.assertEqual(models["xx", "scorer"]["license"], "Commercial")
         self.assertEqual(models["en", "scorer"]["license"], "unspecified")
         self.assertFalse(models["en", "scorer"]["bundled"])
@@ -74,6 +74,9 @@ class TestModelsDir(unittest.TestCase):
         self.assertTrue(models["generic", "free_scorer"]["bundled"])
         self.assertTrue(models["nl", "native"]["bundled"])
         self.assertEqual(len(models), 14)
+        student = [m for m in gop.installed_models() if m["recognizer"] == "student"]
+        self.assertEqual(sorted(m["kind"] for m in student), ["scorer", "word_mdd"])
+        self.assertTrue(all(m["bundled"] and m["lang"] == "en" for m in student))
 
     def test_cli_lists_models(self):
         self._write("scorer_xx.json", _scorer("xx", license="Commercial"))
