@@ -28,13 +28,18 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), na
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 
-def _save_upload_as_wav(upload: UploadFile) -> str:
+def _load_upload(upload: UploadFile):
+    """Decode an uploaded recording to a 16 kHz mono waveform, leaving nothing on disk.
+
+    ``audio.load`` decodes webm, m4a and the rest through ffmpeg and resamples, so the
+    upload is read once from a temporary file that is removed whatever happens.
+    """
     suffix = os.path.splitext(upload.filename or "")[1] or ".webm"
     fd, path = tempfile.mkstemp(suffix=suffix, prefix="openpronounce-upload-")
-    with os.fdopen(fd, "wb") as buffer:
-        buffer.write(upload.file.read())
     try:
-        return audio.webm2wav(path)
+        with os.fdopen(fd, "wb") as buffer:
+            buffer.write(upload.file.read())
+        return audio.load(path)
     finally:
         try:
             os.remove(path)
@@ -55,8 +60,7 @@ async def api_analyze_pronunciation(file: UploadFile = File(...), expected_text:
     """Score ``file`` against ``expected_text`` in ``lang``. Returns the full analysis (score, errors, prosody)."""
     lang = _validate_lang(lang)
     try:
-        wav_file = _save_upload_as_wav(file)
-        sound = audio.load(wav_file)
+        sound = _load_upload(file)
         return speech.compare_audio_with_text(sound, expected_text, lang=lang)
     except Exception:
         logger.exception("pronunciation analysis failed")
@@ -68,8 +72,7 @@ async def api_assess_free_speech(file: UploadFile = File(...), lang: str = Form(
     """Score ``file`` without an expected text: transcript, scores and unclear words (see ``openpronounce.free``)."""
     lang = _validate_lang(lang)
     try:
-        wav_file = _save_upload_as_wav(file)
-        sound = audio.load(wav_file)
+        sound = _load_upload(file)
         return free.assess(sound, lang=lang)
     except Exception:
         logger.exception("free speech analysis failed")
@@ -81,8 +84,7 @@ async def api_speech2text(file: UploadFile = File(...), lang: str = Form(DEFAULT
     """Transcribe ``file`` with the Wav2Vec2 model of ``lang``."""
     lang = _validate_lang(lang)
     try:
-        wav_file = _save_upload_as_wav(file)
-        sound = audio.load(wav_file)
+        sound = _load_upload(file)
         return {"transcript": speech.transcribe(sound, lang)}
     except Exception:
         logger.exception("transcription failed")
