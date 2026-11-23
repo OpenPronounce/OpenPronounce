@@ -1,9 +1,21 @@
+import io
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+import soundfile as sf
 from fastapi.testclient import TestClient
 
 import server
+
+
+def _wav_upload(name="rec.wav"):
+    buf = io.BytesIO()
+    sf.write(buf, np.zeros(16000, dtype="float32"), 16000, format="WAV")
+    buf.seek(0)
+    return {"file": (name, buf, "audio/wav")}
 
 
 class TestServer(unittest.TestCase):
@@ -63,3 +75,45 @@ class TestFreeSpeechRoute(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"mode": "free", "score": 70.0})
         self.assertEqual(assess.call_args.kwargs, {"lang": "en"})
+
+
+class TestUploadsLeaveNothingOnDisk(unittest.TestCase):
+    """A recording is decoded in memory: neither the upload nor a converted copy stays in the temp dir."""
+
+    ROUTES = (
+        ("/pronunciation", "server.speech.compare_audio_with_text", {"expected_text": "hello"}),
+        ("/free", "server.free.assess", {}),
+        ("/speech2text", "server.speech.transcribe", {}),
+    )
+
+    def setUp(self):
+        self.client = TestClient(server.app)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        patcher = patch.object(tempfile, "tempdir", self.tmp)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def assert_temp_dir_empty(self):
+        self.assertEqual(os.listdir(self.tmp), [])
+
+    def test_success_leaves_nothing(self):
+        for route, target, data in self.ROUTES:
+            with self.subTest(route=route), patch(target, return_value={}):
+                response = self.client.post(route, data=data, files=_wav_upload())
+                self.assertEqual(response.status_code, 200)
+                self.assert_temp_dir_empty()
+
+    def test_failure_leaves_nothing(self):
+        for route, target, data in self.ROUTES:
+            with self.subTest(route=route), patch(target, side_effect=RuntimeError("boom")):
+                response = self.client.post(route, data=data, files=_wav_upload())
+                self.assertEqual(response.status_code, 500)
+                self.assert_temp_dir_empty()
+
+    def test_undecodable_upload_leaves_nothing(self):
+        files = {"file": ("rec.webm", io.BytesIO(b"not audio"), "audio/webm")}
+        response = self.client.post("/speech2text", files=files)
+        self.assertEqual(response.status_code, 500)
+        self.assert_temp_dir_empty()
