@@ -18,7 +18,7 @@ jobs:
           ref: ${{ github.ref }}
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
       - name: Check that the ref is a tag matching pyproject version
         env:
           TAG: ${{ github.ref_name }}

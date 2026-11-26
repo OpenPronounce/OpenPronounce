@@ -37,7 +37,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU wheel
 pip install openpronounce
 ```
 
-You need Python 3.10+ and `ffmpeg`; every language other than English also needs the `espeak-ng` program. The first run downloads two Wav2Vec2 checkpoints of 1.2 GB each.
+You need Python 3.11+ and `ffmpeg`; every language other than English also needs the `espeak-ng` program. The first run downloads two Wav2Vec2 checkpoints of 1.2 GB each.
 
 ## Use it
 

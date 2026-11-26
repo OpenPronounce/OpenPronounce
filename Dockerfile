@@ -5,7 +5,7 @@
 #
 # The two Wav2Vec2 models (~1.2 GB each) are downloaded at build time so the
 # container starts fast and works offline (except gTTS, which needs the network).
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

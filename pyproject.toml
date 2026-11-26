@@ -9,7 +9,7 @@ description = "Open-source, phoneme-level pronunciation assessment (Wav2Vec2 for
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "Jean-François Lépine" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 keywords = [
     "pronunciation", "pronunciation-assessment", "speech", "phonemes", "wav2vec2",
     "CAPT", "language-learning", "asr", "prosody", "visemes",
@@ -20,9 +20,10 @@ classifiers = [
     "Intended Audience :: Education",
     "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Education",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
