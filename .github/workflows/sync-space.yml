@@ -1,19 +1,13 @@
 name: Sync Hugging Face Space
 
+# Manual only, on purpose. Hugging Face answers 402 Payment Required on
+# repos/create for a Docker Space on a free account ("hosting Gradio and Docker
+# Spaces on free cpu-basic requires a PRO subscription"), so the Space was never
+# created and every push to main ended in a red run. Dispatch this once the Space
+# can exist: Actions > Sync Hugging Face Space > Run workflow.
 # Needs a repository secret HF_TOKEN (write access) at
 # https://github.com/OpenPronounce/OpenPronounce/settings/secrets/actions
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - "openpronounce/**"
-      - "server.py"
-      - "templates/**"
-      - "static/**"
-      - "Dockerfile"
-      - "pyproject.toml"
-      - "docs/space-README.md"
-      - "scripts/sync_space.sh"
   workflow_dispatch:
 
 jobs:
@@ -24,7 +18,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install "huggingface_hub[cli]"
+      - run: pip install "huggingface_hub[cli]>=0.34,<3"
       - run: scripts/sync_space.sh Halleck45/OpenPronounce
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
