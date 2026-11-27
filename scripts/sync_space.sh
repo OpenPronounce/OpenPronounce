@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Assemble the Hugging Face Space (Docker SDK) from this repo and upload it.
 # Usage: HF_TOKEN=... scripts/sync_space.sh [space_id]
+#
+# Run by hand, not by CI. Hugging Face answers 402 Payment Required on
+# repos/create for a Docker Space on a free account, so the Space does not exist
+# and the GitHub workflow that called this on every push to main only turned main
+# red (removed in 2026-11, see git history for sync-space.yml).
 set -euo pipefail
 SPACE="${1:-Halleck45/OpenPronounce}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
